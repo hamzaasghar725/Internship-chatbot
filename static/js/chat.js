@@ -74,3 +74,17 @@ sendBtn.addEventListener("click", sendQuery);
 queryInput.addEventListener("keypress", (e) => {
     if (e.key === "Enter") sendQuery();
 });
+
+
+// Load previous chat history when the page opens
+async function loadHistory() {
+    const res = await fetch("/history");
+    if (!res.ok) return;
+    const data = await res.json();
+    (data.history || []).forEach(item => {
+        addMessage(item.question, "user");
+        addMessage(item.response, "bot", item.sources || []);
+    });
+}
+
+loadHistory();

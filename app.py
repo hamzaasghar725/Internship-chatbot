@@ -3,7 +3,7 @@ from flask import Flask, render_template, request, redirect, url_for, flash, jso
 from flask_login import LoginManager, login_user, login_required, logout_user, current_user
 from dotenv import load_dotenv
 
-from models import db, User
+from models import db, User, ChatHistory
 from rag.rag_utils import build_or_update_index, retrieve_relevant_chunks, generate_answer, summarize_document
 from face_utils import decode_base64_image, get_face_embedding, embedding_to_json, find_matching_user, FaceNotDetectedError
 
@@ -150,6 +150,28 @@ def chat():
     return render_template("chat.html", username=current_user.username)
 
 
+@app.route("/history", methods=["GET"])
+@login_required
+def history():
+    """Return this user's past questions & answers, oldest first."""
+    records = (
+        ChatHistory.query
+        .filter_by(user_id=current_user.id)
+        .order_by(ChatHistory.timestamp.asc())
+        .all()
+    )
+    return jsonify({"history": [r.to_dict() for r in records]})
+
+
+@app.route("/history/clear", methods=["POST"])
+@login_required
+def clear_history():
+    """Delete this user's chat history (optional utility)."""
+    ChatHistory.query.filter_by(user_id=current_user.id).delete()
+    db.session.commit()
+    return jsonify({"message": "Chat history cleared."})
+
+
 @app.route("/upload", methods=["POST"])
 @login_required
 def upload():
@@ -183,6 +205,16 @@ def ask():
     chunks = retrieve_relevant_chunks(current_user.id, query, top_k=4)
     answer = generate_answer(query, chunks)
     sources = list({c["source"] for c in chunks})
+
+    # Save this Q&A into chat history
+    record = ChatHistory(
+        user_id=current_user.id,
+        question=query,
+        response=answer,
+        sources=",".join(sources) if sources else None,
+    )
+    db.session.add(record)
+    db.session.commit()
 
     return jsonify({"answer": answer, "sources": sources})
 
