@@ -5,7 +5,7 @@ from dotenv import load_dotenv
 
 from models import db, User, ChatHistory
 from rag.rag_utils import build_or_update_index, retrieve_relevant_chunks, generate_answer, summarize_document
-from face_utils import decode_base64_image, get_face_embedding, embedding_to_json, find_matching_user, FaceNotDetectedError
+from face_utils import decode_base64_image, get_face_embedding, embedding_to_json, find_matching_user, FaceNotDetectedError, MultipleFacesDetectedError
 
 load_dotenv()
 
@@ -66,6 +66,9 @@ def signup():
         try:
             image_array = decode_base64_image(face_image)
             face_vector = get_face_embedding(image_array)
+        except MultipleFacesDetectedError as e:
+            flash(str(e), "error")
+            return redirect(url_for("signup"))
         except FaceNotDetectedError as e:
             flash(str(e), "error")
             return redirect(url_for("signup"))
@@ -113,6 +116,8 @@ def login_face():
     try:
         image_array = decode_base64_image(face_image)
         candidate_vector = get_face_embedding(image_array)
+    except MultipleFacesDetectedError as e:
+        return jsonify({"success": False, "error": str(e)}), 400
     except FaceNotDetectedError as e:
         return jsonify({"success": False, "error": str(e)}), 400
     except Exception:

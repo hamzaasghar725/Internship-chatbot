@@ -38,6 +38,11 @@ class FaceNotDetectedError(Exception):
     pass
 
 
+class MultipleFacesDetectedError(Exception):
+    """Raised when more than one face is found in the submitted image."""
+    pass
+
+
 def decode_base64_image(data_url):
     """Convert a 'data:image/jpeg;base64,...' string from the browser into a numpy array."""
     if "," in data_url:
@@ -63,6 +68,12 @@ def get_face_embedding(image_array):
 
     if not results:
         raise FaceNotDetectedError("Could not detect a face.")
+
+    if len(results) > 1:
+        raise MultipleFacesDetectedError(
+            f"{len(results)} faces detected in the frame. "
+            "Please make sure only one person is visible to the camera."
+        )
 
     return np.array(results[0]["embedding"], dtype=np.float32)
 
