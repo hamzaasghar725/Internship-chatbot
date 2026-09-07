@@ -1,0 +1,109 @@
+{% extends "base.html" %}
+{% block title %}Login{% endblock %}
+{% block content %}
+<div class="auth-container">
+    <div class="auth-card">
+        <h2>Login</h2>
+
+        <div class="login-tabs">
+            <button type="button" class="tab-btn active" id="tabPassword">Password</button>
+            <button type="button" class="tab-btn" id="tabFace">Face</button>
+        </div>
+
+        <form method="POST" id="passwordForm" class="login-panel">
+            <input type="text" name="username" placeholder="Username" required>
+            <input type="password" name="password" placeholder="Password" required>
+            <button type="submit">
+                Sign In
+                <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" style="width:16px;height:16px;vertical-align:-3px;margin-left:6px;"><line x1="5" y1="12" x2="19" y2="12"/><polyline points="12 5 19 12 12 19"/></svg>
+            </button>
+        </form>
+
+        <div id="facePanel" class="login-panel hidden">
+            <div class="face-frame" id="faceFrame">
+                <video id="loginVideo" autoplay muted playsinline></video>
+            </div>
+            <canvas id="loginCanvas" class="hidden"></canvas>
+            <p id="faceLoginStatus" class="face-status">Starting camera...</p>
+            <button type="button" id="faceLoginBtn" class="face-btn">
+                <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M23 19a2 2 0 0 1-2 2H3a2 2 0 0 1-2-2V8a2 2 0 0 1 2-2h4l2-3h6l2 3h4a2 2 0 0 1 2 2z"/><circle cx="12" cy="13" r="4"/></svg>
+                Scan Face &amp; Login
+            </button>
+        </div>
+
+        <p class="switch-link">Don't have an account? <a href="{{ url_for('signup') }}">Sign Up</a></p>
+    </div>
+</div>
+
+<script src="{{ url_for('static', filename='js/face-capture.js') }}"></script>
+<script>
+  const tabPassword = document.getElementById("tabPassword");
+  const tabFace = document.getElementById("tabFace");
+  const passwordForm = document.getElementById("passwordForm");
+  const facePanel = document.getElementById("facePanel");
+  const video = document.getElementById("loginVideo");
+  const canvas = document.getElementById("loginCanvas");
+  const status = document.getElementById("faceLoginStatus");
+  const faceLoginBtn = document.getElementById("faceLoginBtn");
+
+  let stream = null;
+  let cameraStarted = false;
+
+  tabPassword.addEventListener("click", () => {
+    tabPassword.classList.add("active");
+    tabFace.classList.remove("active");
+    passwordForm.classList.remove("hidden");
+    facePanel.classList.add("hidden");
+    stopCamera(stream);
+    cameraStarted = false;
+  });
+
+  tabFace.addEventListener("click", async () => {
+    tabFace.classList.add("active");
+    tabPassword.classList.remove("active");
+    facePanel.classList.remove("hidden");
+    passwordForm.classList.add("hidden");
+
+    if (!cameraStarted) {
+      try {
+        stream = await startCamera(video);
+        cameraStarted = true;
+        status.textContent = "Center your face in the frame, then press scan.";
+      } catch (err) {
+        status.textContent = "Couldn't access the camera. Check browser permissions.";
+      }
+    }
+  });
+
+  faceLoginBtn.addEventListener("click", async () => {
+    if (!cameraStarted) return;
+
+    faceLoginBtn.disabled = true;
+    status.textContent = "Matching your face...";
+
+    const dataUrl = captureFrame(video, canvas);
+
+    try {
+      const response = await fetch("/login-face", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ image: dataUrl }),
+      });
+      const result = await response.json();
+
+      if (result.success) {
+        status.textContent = `Welcome, ${result.username}!`;
+        window.location.href = result.redirect;
+      } else {
+        status.textContent = result.error || "Login failed.";
+      }
+    } catch (err) {
+      status.textContent = "Couldn't reach the server.";
+    } finally {
+      faceLoginBtn.disabled = false;
+    }
+  });
+
+  window.addEventListener("beforeunload", () => stopCamera(stream));
+</script>
+{% endblock %}

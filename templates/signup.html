@@ -1,0 +1,83 @@
+{% extends "base.html" %}
+{% block title %}Sign Up{% endblock %}
+{% block content %}
+<div class="auth-container">
+    <form class="auth-card" method="POST" id="signupForm">
+        <h2>Sign Up</h2>
+        <input type="text" name="username" placeholder="Username" required>
+        <input type="email" name="email" placeholder="Email" required>
+        <input type="password" name="password" placeholder="Password" required>
+
+        <div class="face-capture-block">
+            <div class="face-frame" id="faceFrame">
+                <video id="signupVideo" autoplay muted playsinline></video>
+                <img id="signupPreview" class="face-preview hidden" alt="Captured face">
+            </div>
+            <canvas id="signupCanvas" class="hidden"></canvas>
+            <p id="faceStatus" class="face-status">Starting camera...</p>
+            <button type="button" id="captureBtn" class="face-btn">
+                <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M23 19a2 2 0 0 1-2 2H3a2 2 0 0 1-2-2V8a2 2 0 0 1 2-2h4l2-3h6l2 3h4a2 2 0 0 1 2 2z"/><circle cx="12" cy="13" r="4"/></svg>
+                Capture Face
+            </button>
+            <button type="button" id="retakeBtn" class="face-btn secondary hidden">
+                <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polyline points="1 4 1 10 7 10"/><path d="M3.51 15a9 9 0 1 0 2.13-9.36L1 10"/></svg>
+                Retake
+            </button>
+        </div>
+
+        <input type="hidden" name="face_image" id="faceImageInput">
+        <button type="submit" id="signupSubmit" disabled>
+            Create Account
+            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" style="width:16px;height:16px;vertical-align:-3px;margin-left:6px;"><line x1="5" y1="12" x2="19" y2="12"/><polyline points="12 5 19 12 12 19"/></svg>
+        </button>
+        <p class="switch-link">Already have an account? <a href="{{ url_for('login') }}">Login</a></p>
+    </form>
+</div>
+
+<script src="{{ url_for('static', filename='js/face-capture.js') }}"></script>
+<script>
+  const video = document.getElementById("signupVideo");
+  const preview = document.getElementById("signupPreview");
+  const canvas = document.getElementById("signupCanvas");
+  const status = document.getElementById("faceStatus");
+  const captureBtn = document.getElementById("captureBtn");
+  const retakeBtn = document.getElementById("retakeBtn");
+  const faceImageInput = document.getElementById("faceImageInput");
+  const submitBtn = document.getElementById("signupSubmit");
+
+  let stream = null;
+
+  (async () => {
+    try {
+      stream = await startCamera(video);
+      status.textContent = "Center your face in the frame, then press Capture.";
+    } catch (err) {
+      status.textContent = "Couldn't access the camera. Check browser permissions.";
+    }
+  })();
+
+  captureBtn.addEventListener("click", () => {
+    const dataUrl = captureFrame(video, canvas);
+    faceImageInput.value = dataUrl;
+    preview.src = dataUrl;
+    preview.classList.remove("hidden");
+    video.classList.add("hidden");
+    captureBtn.classList.add("hidden");
+    retakeBtn.classList.remove("hidden");
+    submitBtn.disabled = false;
+    status.textContent = "Face captured. You can now create your account.";
+  });
+
+  retakeBtn.addEventListener("click", () => {
+    faceImageInput.value = "";
+    preview.classList.add("hidden");
+    video.classList.remove("hidden");
+    captureBtn.classList.remove("hidden");
+    retakeBtn.classList.add("hidden");
+    submitBtn.disabled = true;
+    status.textContent = "Center your face in the frame, then press Capture.";
+  });
+
+  window.addEventListener("beforeunload", () => stopCamera(stream));
+</script>
+{% endblock %}
