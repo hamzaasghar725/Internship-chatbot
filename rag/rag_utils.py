@@ -4,6 +4,8 @@ import time
 import numpy as np
 import faiss
 from PyPDF2 import PdfReader
+import csv
+from docx import Document
 from sentence_transformers import SentenceTransformer
 import requests
 
@@ -37,17 +39,27 @@ def get_embed_model():
 
 
 def extract_text(file_path):
-    """Extracts text from a PDF or TXT file."""
-    if file_path.lower().endswith(".pdf"):
+    """Extracts text from a PDF, DOCX, CSV, or TXT file."""
+    lower = file_path.lower()
+    if lower.endswith(".pdf"):
         reader = PdfReader(file_path)
         text = ""
         for page in reader.pages:
             text += (page.extract_text() or "") + "\n"
         return text
+    elif lower.endswith(".docx"):
+        doc = Document(file_path)
+        return "\n".join(para.text for para in doc.paragraphs)
+    elif lower.endswith(".csv"):
+        text_lines = []
+        with open(file_path, "r", encoding="utf-8", errors="ignore", newline="") as f:
+            reader = csv.reader(f)
+            for row in reader:
+                text_lines.append(", ".join(row))
+        return "\n".join(text_lines)
     else:  # .txt and other plain text files
         with open(file_path, "r", encoding="utf-8", errors="ignore") as f:
             return f.read()
-
 
 def chunk_text(text, chunk_size=CHUNK_SIZE, overlap=CHUNK_OVERLAP):
     """Splits text into overlapping chunks so context isn't lost at boundaries."""

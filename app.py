@@ -11,7 +11,7 @@ load_dotenv()
 
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
 UPLOAD_FOLDER = os.path.join(BASE_DIR, "uploads")
-ALLOWED_EXTENSIONS = {"pdf", "txt"}
+ALLOWED_EXTENSIONS = {"pdf", "txt", "docx", "csv"}
 
 app = Flask(__name__)
 app.config["SECRET_KEY"] = os.environ.get("SECRET_KEY", "dev-secret-key")
@@ -185,7 +185,7 @@ def upload():
 
     file = request.files["document"]
     if file.filename == "" or not allowed_file(file.filename):
-        return jsonify({"error": "Only .pdf or .txt files are allowed."}), 400
+        return jsonify({"error": "Only .pdf, .txt, .docx, or .csv files are allowed."}), 400
 
     os.makedirs(app.config["UPLOAD_FOLDER"], exist_ok=True)
     save_path = os.path.join(app.config["UPLOAD_FOLDER"], f"{current_user.id}_{file.filename}")
