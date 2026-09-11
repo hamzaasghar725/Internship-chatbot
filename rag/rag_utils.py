@@ -4,10 +4,18 @@ import time
 import numpy as np
 import faiss
 from PyPDF2 import PdfReader
-import csv
-from docx import Document
 from sentence_transformers import SentenceTransformer
 import requests
+import certifi
+
+# Some Windows setups have a stale SSL_CERT_FILE environment variable pointing
+# to a certificate file that no longer exists, which crashes any library that
+# creates its own HTTPS client (like Langfuse's httpx client). Fix it here by
+# falling back to certifi's bundled certificates if the current path is invalid.
+if not os.environ.get("SSL_CERT_FILE") or not os.path.exists(os.environ["SSL_CERT_FILE"]):
+    os.environ["SSL_CERT_FILE"] = certifi.where()
+
+from langfuse import get_client
 
 # ---- Config ----
 EMBED_MODEL_NAME = "all-MiniLM-L6-v2"
@@ -28,6 +36,20 @@ CHUNK_OVERLAP = 50
 VECTORSTORE_DIR = os.path.join(os.path.dirname(__file__), "..", "vectorstore")
 
 _embed_model = None
+_langfuse_client = None
+
+
+def _get_langfuse_client():
+    """
+    Returns the Langfuse client only if keys are configured in .env, else None.
+    This keeps Langfuse fully optional: the app works fine without it.
+    """
+    global _langfuse_client
+    if not os.environ.get("LANGFUSE_PUBLIC_KEY"):
+        return None
+    if _langfuse_client is None:
+        _langfuse_client = get_client()
+    return _langfuse_client
 
 
 def get_embed_model():
@@ -39,27 +61,17 @@ def get_embed_model():
 
 
 def extract_text(file_path):
-    """Extracts text from a PDF, DOCX, CSV, or TXT file."""
-    lower = file_path.lower()
-    if lower.endswith(".pdf"):
+    """Extracts text from a PDF or TXT file."""
+    if file_path.lower().endswith(".pdf"):
         reader = PdfReader(file_path)
         text = ""
         for page in reader.pages:
             text += (page.extract_text() or "") + "\n"
         return text
-    elif lower.endswith(".docx"):
-        doc = Document(file_path)
-        return "\n".join(para.text for para in doc.paragraphs)
-    elif lower.endswith(".csv"):
-        text_lines = []
-        with open(file_path, "r", encoding="utf-8", errors="ignore", newline="") as f:
-            reader = csv.reader(f)
-            for row in reader:
-                text_lines.append(", ".join(row))
-        return "\n".join(text_lines)
     else:  # .txt and other plain text files
         with open(file_path, "r", encoding="utf-8", errors="ignore") as f:
             return f.read()
+
 
 def chunk_text(text, chunk_size=CHUNK_SIZE, overlap=CHUNK_OVERLAP):
     """Splits text into overlapping chunks so context isn't lost at boundaries."""
@@ -143,7 +155,10 @@ def retrieve_relevant_chunks(user_id, query, top_k=4):
 
 
 def _post_to_gemini(model_name, api_key, prompt, max_retries=2):
-    """Calls Gemini with one specific model name, retrying on temporary errors."""
+    """
+    Calls Gemini with one specific model name, retrying on temporary errors.
+    Returns (answer_text, usage_dict) where usage_dict has input/output/total tokens.
+    """
     url = f"https://generativelanguage.googleapis.com/v1beta/models/{model_name}:generateContent"
     last_error = None
     for attempt in range(max_retries):
@@ -162,7 +177,14 @@ def _post_to_gemini(model_name, api_key, prompt, max_retries=2):
             )
             response.raise_for_status()
             data = response.json()
-            return data["candidates"][0]["content"]["parts"][0]["text"]
+            answer_text = data["candidates"][0]["content"]["parts"][0]["text"]
+            usage = data.get("usageMetadata", {})
+            token_usage = {
+                "input_tokens": usage.get("promptTokenCount", 0),
+                "output_tokens": usage.get("candidatesTokenCount", 0),
+                "total_tokens": usage.get("totalTokenCount", 0),
+            }
+            return answer_text, token_usage
         except requests.exceptions.HTTPError as e:
             status = e.response.status_code if e.response is not None else None
             last_error = e
@@ -178,18 +200,22 @@ def _post_to_gemini(model_name, api_key, prompt, max_retries=2):
     raise last_error
 
 
-def _call_gemini(prompt):
+def _call_gemini(prompt, trace_name="gemini-call"):
     """
     Calls the Gemini REST API directly over HTTP (no SDK, to avoid
     protobuf/tensorflow version conflicts).
     Returns None if GEMINI_API_KEY is not set.
     Model names change over time (Google deprecates them), so we try
     several candidates until one works.
+    Logs the call (model, prompt, answer, token usage) to Langfuse if
+    LANGFUSE_PUBLIC_KEY is configured in .env; otherwise this is skipped.
     """
     global _working_model_name
     api_key = os.environ.get("GEMINI_API_KEY")
     if not api_key:
         return None
+
+    langfuse = _get_langfuse_client()
 
     # Try whichever model worked last time first (if any)
     models_to_try = ([_working_model_name] if _working_model_name else []) + \
@@ -198,7 +224,19 @@ def _call_gemini(prompt):
     last_error = None
     for model_name in models_to_try:
         try:
-            answer = _post_to_gemini(model_name, api_key, prompt)
+            if langfuse:
+                with langfuse.start_as_current_observation(
+                    as_type="generation",
+                    name=trace_name,
+                    model=model_name,
+                    input=prompt,
+                ) as generation:
+                    answer, token_usage = _post_to_gemini(model_name, api_key, prompt)
+                    generation.update(output=answer, usage_details=token_usage)
+                langfuse.flush()  # send the trace to Langfuse right away
+            else:
+                answer, token_usage = _post_to_gemini(model_name, api_key, prompt)
+
             _working_model_name = model_name  # cache this model for next time
             return answer
         except requests.exceptions.HTTPError as e:
@@ -240,9 +278,9 @@ Question: {query}
 
 Answer:"""
 
-    answer = _call_gemini(prompt)
+    answer = _call_gemini(prompt, trace_name="rag-answer")
     if answer is None:
-        # Fallback: no LLM available, just show the relevant chunks
+        # Fallback: no LLM available, just show the retrieved context directly
         return ("(GEMINI_API_KEY is not set, so showing the retrieved context directly)\n\n"
                 + context)
     return answer
@@ -279,7 +317,7 @@ Respond in English.
 
 Summary:"""
 
-    summary = _call_gemini(prompt)
+    summary = _call_gemini(prompt, trace_name="rag-summary")
     if summary is None:
         return ("(GEMINI_API_KEY is not set, so a summary could not be generated. "
                 "Showing a portion of the document below instead)\n\n" + full_text[:1000])
