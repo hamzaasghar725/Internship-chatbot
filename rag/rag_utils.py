@@ -15,7 +15,7 @@ import certifi
 if not os.environ.get("SSL_CERT_FILE") or not os.path.exists(os.environ["SSL_CERT_FILE"]):
     os.environ["SSL_CERT_FILE"] = certifi.where()
 
-from langfuse import get_client
+from langfuse import get_client, propagate_attributes
 
 # ---- Config ----
 EMBED_MODEL_NAME = "all-MiniLM-L6-v2"
@@ -256,6 +256,65 @@ def _call_gemini(prompt, trace_name="gemini-call"):
     raise last_error
 
 
+def answer_question(user_id, query, session_id=None, top_k=4):
+    """
+    Full RAG pipeline for one user question: retrieval + generation.
+
+    This is the single entry point /ask should call. When Langfuse is
+    configured it wraps the whole thing in ONE parent trace/span
+    ("rag-chat") with two children nested under it:
+        rag-chat (root span)
+          |- retrieval        (span: which chunks were fetched)
+          |- rag-answer       (generation: the LLM call, from _call_gemini)
+    That's what produces the trace graph (root -> retrieval -> generation)
+    in the Langfuse UI, instead of a single disconnected generation.
+    Without Langfuse configured, this just runs retrieval + generation with
+    no tracing overhead, exactly as before.
+    """
+    langfuse = _get_langfuse_client()
+
+    if not langfuse:
+        chunks = retrieve_relevant_chunks(user_id, query, top_k=top_k)
+        answer = generate_answer(query, chunks)
+        sources = list({c["source"] for c in chunks})
+        return answer, sources
+
+    with langfuse.start_as_current_observation(
+        name="rag-chat",
+        as_type="span",
+        input={"query": query},
+    ) as root_span:
+        # Trace-level attributes -- these are what let you filter/search by
+        # user or conversation in the Langfuse dashboard (Session/User ID
+        # pills you saw in the QueryMind screenshot). propagate_attributes()
+        # applies them to this span AND every child span opened inside it.
+        with propagate_attributes(
+            user_id=f"user_{user_id}",
+            session_id=session_id,
+            metadata={"mode": "chat"},
+        ):
+            with langfuse.start_as_current_observation(
+                name="retrieval",
+                as_type="retriever",
+                input={"query": query, "top_k": top_k},
+            ) as retrieval_span:
+                chunks = retrieve_relevant_chunks(user_id, query, top_k=top_k)
+                sources = list({c["source"] for c in chunks})
+                retrieval_span.update(
+                    output={"num_chunks_found": len(chunks), "sources": sources},
+                )
+
+            # generate_answer() -> _call_gemini() opens its own "generation"
+            # observation internally; because we're still inside this context,
+            # Langfuse automatically nests it under rag-chat.
+            answer = generate_answer(query, chunks)
+
+        root_span.update(output={"answer": answer, "sources": sources})
+
+    langfuse.flush()
+    return answer, sources
+
+
 def generate_answer(query, context_chunks):
     """
     Builds context from retrieved chunks and asks the LLM to generate an answer.
@@ -298,23 +357,59 @@ Answer:"""
     return answer
 
 
-def summarize_document(user_id, filename=None):
+def summarize_document(user_id, filename=None, session_id=None):
     """
     Generates a summary of the user's uploaded document(s).
     If filename is given, only that file's chunks are summarized; otherwise all of them.
+    Wrapped in a Langfuse trace the same way as answer_question(), so it shows
+    up as its own "rag-summary" trace with a nested "load-document" span and
+    the generation, rather than a disconnected generation.
     """
-    index_path, meta_path = _paths_for_user(user_id)
-    if not os.path.exists(meta_path):
-        return "No document has been uploaded yet. Please upload a document first."
+    langfuse = _get_langfuse_client()
 
-    with open(meta_path, "rb") as f:
-        metadata = pickle.load(f)
+    def _load_chunks():
+        index_path, meta_path = _paths_for_user(user_id)
+        if not os.path.exists(meta_path):
+            return None
+        with open(meta_path, "rb") as f:
+            metadata = pickle.load(f)
+        if filename:
+            return [m["text"] for m in metadata if m["source"] == filename]
+        return [m["text"] for m in metadata]
 
-    if filename:
-        chunks = [m["text"] for m in metadata if m["source"] == filename]
-    else:
-        chunks = [m["text"] for m in metadata]
+    if not langfuse:
+        chunks = _load_chunks()
+        if chunks is None:
+            return "No document has been uploaded yet. Please upload a document first."
+        return _summarize_chunks(chunks, filename)
 
+    with langfuse.start_as_current_observation(
+        name="rag-summary",
+        as_type="span",
+        input={"filename": filename or "all documents"},
+    ) as root_span:
+        with propagate_attributes(
+            user_id=f"user_{user_id}",
+            session_id=session_id,
+            metadata={"mode": "summary"},
+        ):
+            with langfuse.start_as_current_observation(name="load-document", as_type="span") as load_span:
+                chunks = _load_chunks()
+                load_span.update(output={"num_chunks": len(chunks) if chunks is not None else 0})
+
+            if chunks is None:
+                root_span.update(output={"error": "no document uploaded"})
+                return "No document has been uploaded yet. Please upload a document first."
+
+            summary = _summarize_chunks(chunks, filename)
+
+        root_span.update(output={"summary": summary})
+
+    langfuse.flush()
+    return summary
+
+
+def _summarize_chunks(chunks, filename=None):
     if not chunks:
         return "No document with that name was found."
 
@@ -329,7 +424,7 @@ Respond in English.
 
 Summary:"""
 
-    summary = _call_gemini(prompt, trace_name="rag-summary")
+    summary = _call_gemini(prompt, trace_name="rag-summary-generation")
     if summary is None:
         return ("(GEMINI_API_KEY is not set, so a summary could not be generated. "
                 "Showing a portion of the document below instead)\n\n" + full_text[:1000])

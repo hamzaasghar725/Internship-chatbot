@@ -12,7 +12,7 @@ from sqlalchemy import text
 load_dotenv()
 
 from models import db, User, ChatHistory, ChatSession
-from rag.rag_utils import build_or_update_index, retrieve_relevant_chunks, generate_answer, summarize_document
+from rag.rag_utils import build_or_update_index, answer_question, summarize_document
 from face_utils import decode_base64_image, get_face_embedding, embedding_to_json, find_matching_user, FaceNotDetectedError, MultipleFacesDetectedError
 from clerk_utils import (
     is_clerk_configured,
@@ -418,9 +418,7 @@ def ask():
     if not query:
         return jsonify({"error": "Question is empty."}), 400
 
-    chunks = retrieve_relevant_chunks(current_user.id, query, top_k=4)
-    answer = generate_answer(query, chunks)
-    sources = list({c["source"] for c in chunks})
+    answer, sources = answer_question(current_user.id, query, session_id=session_id, top_k=4)
 
     # Save this Q&A into chat history, tagged with its conversation (session_id)
     record = ChatHistory(
@@ -441,7 +439,8 @@ def ask():
 def summarize():
     data = request.get_json() or {}
     filename = data.get("filename")  # optional; None = all documents
-    summary = summarize_document(current_user.id, filename)
+    session_id = data.get("session_id")
+    summary = summarize_document(current_user.id, filename, session_id=session_id)
     return jsonify({"summary": summary})
 
 
