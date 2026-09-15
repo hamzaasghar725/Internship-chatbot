@@ -45,3 +45,12 @@ class ChatHistory(db.Model):
             "timestamp": self.timestamp.isoformat(),
             "session_id": self.session_id,
         }
+    
+class ChatSession(db.Model):
+    """One row per conversation. Mainly exists to hold a custom title once the
+    user renames a chat (otherwise the title is just derived from the first
+    question) and to give rename/delete something concrete to act on."""
+    session_id = db.Column(db.String(36), primary_key=True)
+    user_id = db.Column(db.Integer, db.ForeignKey("user.id"), nullable=False, index=True)
+    title = db.Column(db.String(120), nullable=True)  # NULL = use the first question as the title
+    created_at = db.Column(db.DateTime, default=datetime.utcnow)

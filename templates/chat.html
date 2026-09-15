@@ -161,6 +161,40 @@
     // ---- Saved chats list ----
     const chatListEl = document.getElementById("chatList");
 
+    // POSTs JSON and always resolves to { success, error } -- never throws.
+    // If the server returns something that isn't valid JSON (e.g. a Flask
+    // debug error page), this surfaces the real HTTP status/text instead of
+    // the misleading generic "Couldn't reach the server" message.
+    async function postJSON(url, body) {
+        let res;
+        try {
+            res = await fetch(url, {
+                method: "POST",
+                headers: body ? { "Content-Type": "application/json" } : undefined,
+                body: body ? JSON.stringify(body) : undefined,
+            });
+        } catch (err) {
+            return { success: false, error: "Couldn't reach the server. Is it still running?" };
+        }
+        let raw;
+        try {
+            raw = await res.text();
+        } catch (err) {
+            return { success: false, error: `Server error (${res.status}).` };
+        }
+        try {
+            const data = JSON.parse(raw);
+            if (!res.ok && data.success === undefined) {
+                return { success: false, error: data.error || `Server error (${res.status}).` };
+            }
+            return data;
+        } catch (err) {
+            // Response wasn't JSON -- almost always a Flask error page (500/404).
+            console.error("Non-JSON response from", url, "status", res.status, raw.slice(0, 500));
+            return { success: false, error: `Server error (${res.status}). Check the Flask terminal for details.` };
+        }
+    }
+
     function groupLabel(isoTimestamp) {
         const d = new Date(isoTimestamp);
         const startOfDay = (dt) => new Date(dt.getFullYear(), dt.getMonth(), dt.getDate());
@@ -210,18 +244,90 @@
             chatListEl.appendChild(heading);
 
             groups[label].forEach((c) => {
-                const item = document.createElement("button");
-                item.type = "button";
-                item.className = "chat-item" + (c.session_id === activeId ? " active" : "");
-                item.textContent = c.title || "New chat";
-                item.title = c.title || "";
-                item.addEventListener("click", async () => {
+                const item = document.createElement("div");
+                item.className = "chat-item-row" + (c.session_id === activeId ? " active" : "");
+
+                const titleBtn = document.createElement("button");
+                titleBtn.type = "button";
+                titleBtn.className = "chat-item";
+                titleBtn.textContent = c.title || "New chat";
+                titleBtn.title = c.title || "";
+                titleBtn.addEventListener("click", async () => {
                     await window.ChatUI_core.loadSession(c.session_id);
                     renderChatList();
                 });
+
+                const actions = document.createElement("div");
+                actions.className = "chat-item-actions";
+
+                const renameBtn = document.createElement("button");
+                renameBtn.type = "button";
+                renameBtn.className = "chat-item-icon-btn";
+                renameBtn.title = "Rename";
+                renameBtn.innerHTML = '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 20h9"/><path d="M16.5 3.5a2.121 2.121 0 0 1 3 3L7 19l-4 1 1-4Z"/></svg>';
+                renameBtn.addEventListener("click", (e) => {
+                    e.stopPropagation();
+                    startRename(item, titleBtn, c);
+                });
+
+                const deleteBtn = document.createElement("button");
+                deleteBtn.type = "button";
+                deleteBtn.className = "chat-item-icon-btn danger";
+                deleteBtn.title = "Delete";
+                deleteBtn.innerHTML = '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polyline points="3 6 5 6 21 6"/><path d="M19 6l-1 14a2 2 0 0 1-2 2H8a2 2 0 0 1-2-2L5 6"/><path d="M10 11v6"/><path d="M14 11v6"/><path d="M9 6V4a1 1 0 0 1 1-1h4a1 1 0 0 1 1 1v2"/></svg>';
+                deleteBtn.addEventListener("click", async (e) => {
+                    e.stopPropagation();
+                    if (!confirm(`Delete "${c.title || 'this chat'}"? This can't be undone.`)) return;
+                    const result = await postJSON(`/chats/${encodeURIComponent(c.session_id)}/delete`);
+                    if (result.success) {
+                        if (c.session_id === activeId && window.ChatUI_core) {
+                            window.ChatUI_core.startNewChat();
+                        }
+                        renderChatList();
+                    } else {
+                        alert(result.error || "Couldn't delete this chat.");
+                    }
+                });
+
+                actions.appendChild(renameBtn);
+                actions.appendChild(deleteBtn);
+                item.appendChild(titleBtn);
+                item.appendChild(actions);
                 chatListEl.appendChild(item);
             });
         });
+    }
+
+    function startRename(rowEl, titleBtn, chat) {
+        const input = document.createElement("input");
+        input.type = "text";
+        input.className = "chat-item-rename-input";
+        input.value = chat.title || "";
+        input.maxLength = 120;
+
+        rowEl.replaceChild(input, titleBtn);
+        input.focus();
+        input.select();
+
+        let done = false;
+        async function commit() {
+            if (done) return;
+            done = true;
+            const newTitle = input.value.trim();
+            if (!newTitle || newTitle === chat.title) {
+                renderChatList();
+                return;
+            }
+            const result = await postJSON(`/chats/${encodeURIComponent(chat.session_id)}/rename`, { title: newTitle });
+            if (!result.success) alert(result.error || "Couldn't rename this chat.");
+            renderChatList();
+        }
+
+        input.addEventListener("keydown", (e) => {
+            if (e.key === "Enter") { e.preventDefault(); commit(); }
+            if (e.key === "Escape") { done = true; renderChatList(); }
+        });
+        input.addEventListener("blur", commit);
     }
 
     async function startNewChat() {

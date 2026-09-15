@@ -566,6 +566,73 @@ button:focus-visible, a:focus-visible, input:focus-visible {
     font-weight: 600;
 }
 
+.chat-item-row {
+    display: flex;
+    align-items: center;
+    gap: 2px;
+    border-radius: var(--radius-sm);
+    transition: background var(--ease);
+}
+.chat-item-row:hover { background: var(--color-bg-hover); }
+.chat-item-row.active { background: var(--color-accent-soft); }
+.chat-item-row .chat-item { flex: 1; min-width: 0; }
+.chat-item-row:hover .chat-item,
+.chat-item-row.active .chat-item { background: transparent; }
+
+.chat-item-actions {
+    display: flex;
+    gap: 2px;
+    padding-right: 6px;
+    opacity: 0;
+    pointer-events: none;
+    transition: opacity var(--ease);
+}
+/* Only reveal rename/delete once this chat is the active (clicked/open) one --
+   not on hover, so the list stays plain until a chat is actually selected.
+   focus-within stays so the rename input (which replaces the title button)
+   doesn't lose its buttons while being edited. */
+.chat-item-row.active .chat-item-actions,
+.chat-item-row:focus-within .chat-item-actions {
+    opacity: 1;
+    pointer-events: auto;
+}
+
+.chat-item-icon-btn {
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    width: 24px;
+    height: 24px;
+    padding: 0;
+    background: transparent !important;
+    border: none !important;
+    border-radius: 6px;
+    color: var(--color-text-muted);
+    cursor: pointer;
+    transition: background var(--ease), color var(--ease);
+}
+.chat-item-icon-btn svg {
+    width: 14px;
+    height: 14px;
+    stroke: currentColor;
+    fill: none;
+    pointer-events: none;
+}
+.chat-item-icon-btn:hover { background: var(--color-bg-surface-2) !important; color: var(--color-text); }
+.chat-item-icon-btn.danger:hover { color: #ef4444; }
+
+.chat-item-rename-input {
+    flex: 1;
+    min-width: 0;
+    background: var(--color-bg-surface-2);
+    border: 1px solid var(--color-accent-soft);
+    border-radius: var(--radius-sm);
+    padding: 8px 9px;
+    font-size: 13px;
+    color: var(--color-text);
+    outline: none;
+}
+
 .chat-list-empty {
     font-size: 12.5px;
     color: var(--color-text-faint);

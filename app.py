@@ -11,7 +11,7 @@ from sqlalchemy import text
 # empty strings instead of the values from .env.
 load_dotenv()
 
-from models import db, User, ChatHistory
+from models import db, User, ChatHistory, ChatSession
 from rag.rag_utils import build_or_update_index, retrieve_relevant_chunks, generate_answer, summarize_document
 from face_utils import decode_base64_image, get_face_embedding, embedding_to_json, find_matching_user, FaceNotDetectedError, MultipleFacesDetectedError
 from clerk_utils import (
@@ -288,13 +288,22 @@ def list_chats():
         .order_by(ChatHistory.timestamp.asc())
         .all()
     )
+    # Custom titles set via the rename endpoint, keyed by session_id.
+    custom_titles = {
+        s.session_id: s.title
+        for s in ChatSession.query.filter_by(user_id=current_user.id).all()
+        if s.title
+    }
+
     sessions = {}
     for r in records:
         sid = r.session_id or "legacy"
         if sid not in sessions:
             sessions[sid] = {
                 "session_id": sid,
-                "title": (r.question[:48] + "...") if len(r.question) > 48 else r.question,
+                "title": custom_titles.get(sid) or (
+                    (r.question[:48] + "...") if len(r.question) > 48 else r.question
+                ),
                 "last_timestamp": r.timestamp.isoformat(),
             }
         else:
@@ -302,6 +311,51 @@ def list_chats():
 
     chats = sorted(sessions.values(), key=lambda c: c["last_timestamp"], reverse=True)
     return jsonify({"chats": chats})
+
+
+def _owns_session(session_id):
+    """True if the current user has any messages under this session_id (or a
+    ChatSession row for it), so rename/delete can't touch another user's chat."""
+    sid = None if session_id == "legacy" else session_id
+    has_messages = ChatHistory.query.filter_by(user_id=current_user.id, session_id=sid).first() is not None
+    has_session_row = ChatSession.query.filter_by(user_id=current_user.id, session_id=session_id).first() is not None
+    return has_messages or has_session_row
+
+
+@app.route("/chats/<session_id>/rename", methods=["POST"])
+@login_required
+def rename_chat(session_id):
+    if not _owns_session(session_id):
+        return jsonify({"success": False, "error": "Chat not found."}), 404
+
+    data = request.get_json(force=True, silent=True) or {}
+    new_title = (data.get("title") or "").strip()
+    if not new_title:
+        return jsonify({"success": False, "error": "Title can't be empty."}), 400
+    new_title = new_title[:120]
+
+    chat_session = ChatSession.query.filter_by(session_id=session_id).first()
+    if chat_session is None:
+        chat_session = ChatSession(session_id=session_id, user_id=current_user.id)
+        db.session.add(chat_session)
+    chat_session.title = new_title
+    db.session.commit()
+
+    return jsonify({"success": True, "title": new_title})
+
+
+@app.route("/chats/<session_id>/delete", methods=["POST"])
+@login_required
+def delete_chat(session_id):
+    if not _owns_session(session_id):
+        return jsonify({"success": False, "error": "Chat not found."}), 404
+
+    sid = None if session_id == "legacy" else session_id
+    ChatHistory.query.filter_by(user_id=current_user.id, session_id=sid).delete()
+    ChatSession.query.filter_by(user_id=current_user.id, session_id=session_id).delete()
+    db.session.commit()
+
+    return jsonify({"success": True})
 
 
 @app.route("/history", methods=["GET"])
