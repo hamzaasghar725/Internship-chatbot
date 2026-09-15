@@ -267,14 +267,26 @@ def generate_answer(query, context_chunks):
     if not context_chunks:
         return "I couldn't find any content related to this question in your documents. Please upload a document first."
 
-    prompt = f"""Answer the user's question based on the document context below.
-Only use information present in the context. If the answer isn't in the context, say so clearly.
-Respond in English.
+    prompt = f"""You are answering questions about the user's uploaded document(s).
 
-Context:
+Context retrieved from the document(s):
 {context}
 
 Question: {query}
+
+Rules for answering:
+1. First check whether the topic/term the question is about is actually mentioned
+   in the context above (even just by name, without full detail).
+2. If it IS mentioned (even briefly) -- give a complete, proper, correct answer
+   to the question using your own general knowledge, not just what little the
+   document says. The document only needs to establish that the topic is
+   relevant; it doesn't need to contain the full explanation. Prefer to also
+   weave in whatever the document itself adds (extra detail, the document's
+   specific angle, examples, figures) alongside the general explanation.
+3. If the topic/term is NOT mentioned anywhere in the context at all -- do not
+   answer it from general knowledge. Clearly say it isn't covered in the
+   uploaded document(s).
+4. Respond in English.
 
 Answer:"""
 
