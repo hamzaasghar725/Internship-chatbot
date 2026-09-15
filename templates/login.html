@@ -2,7 +2,10 @@
 {% block title %}Login{% endblock %}
 {% block content %}
 <div class="auth-container">
-    <div class="auth-card">
+    <div class="auth-card auth-card-clerk">
+        <div class="auth-logo">
+            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z"/><polyline points="14 2 14 8 20 8"/><line x1="16" y1="13" x2="8" y2="13"/><line x1="16" y1="17" x2="8" y2="17"/></svg>
+        </div>
         <h2>Login</h2>
 
         <div class="login-tabs">
@@ -10,14 +13,19 @@
             <button type="button" class="tab-btn" id="tabFace">Face</button>
         </div>
 
-        <form method="POST" id="passwordForm" class="login-panel">
-            <input type="text" name="username" placeholder="Username" required>
-            <input type="password" name="password" placeholder="Password" required>
-            <button type="submit">
-                Sign In
-                <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" style="width:16px;height:16px;vertical-align:-3px;margin-left:6px;"><line x1="5" y1="12" x2="19" y2="12"/><polyline points="12 5 19 12 12 19"/></svg>
-            </button>
-        </form>
+        {% if not clerk_enabled %}
+        <p class="clerk-setup-notice">
+            Clerk isn't configured yet. Add <code>CLERK_PUBLISHABLE_KEY</code>, <code>CLERK_SECRET_KEY</code>
+            and <code>CLERK_FRONTEND_API</code> to your <code>.env</code> file (see <code>.env.example</code>),
+            then restart the app.
+        </p>
+        {% else %}
+        <div id="clerkSigninPanel" class="login-panel">
+            <div id="clerk-signin" class="clerk-mount"></div>
+            <div id="clerk-captcha"></div>
+            <p id="signinError" class="face-status hidden" style="color:#ff6b6b;"></p>
+        </div>
+        {% endif %}
 
         <div id="facePanel" class="login-panel hidden">
             <div class="face-frame" id="faceFrame">
@@ -36,10 +44,19 @@
 </div>
 
 <script src="{{ url_for('static', filename='js/face-capture.js') }}"></script>
+{% if clerk_enabled %}
+<script
+  async
+  crossorigin="anonymous"
+  data-clerk-publishable-key="{{ clerk_publishable_key }}"
+  src="https://{{ clerk_frontend_api }}/npm/@clerk/clerk-js@latest/dist/clerk.browser.js"
+  type="text/javascript"
+></script>
+{% endif %}
 <script>
   const tabPassword = document.getElementById("tabPassword");
   const tabFace = document.getElementById("tabFace");
-  const passwordForm = document.getElementById("passwordForm");
+  const clerkPanel = document.getElementById("clerkSigninPanel");
   const facePanel = document.getElementById("facePanel");
   const video = document.getElementById("loginVideo");
   const canvas = document.getElementById("loginCanvas");
@@ -52,7 +69,7 @@
   tabPassword.addEventListener("click", () => {
     tabPassword.classList.add("active");
     tabFace.classList.remove("active");
-    passwordForm.classList.remove("hidden");
+    if (clerkPanel) clerkPanel.classList.remove("hidden");
     facePanel.classList.add("hidden");
     stopCamera(stream);
     cameraStarted = false;
@@ -62,7 +79,7 @@
     tabFace.classList.add("active");
     tabPassword.classList.remove("active");
     facePanel.classList.remove("hidden");
-    passwordForm.classList.add("hidden");
+    if (clerkPanel) clerkPanel.classList.add("hidden");
 
     if (!cameraStarted) {
       try {
@@ -105,5 +122,109 @@
   });
 
   window.addEventListener("beforeunload", () => stopCamera(stream));
+
+  {% if clerk_enabled %}
+  (function () {
+    function waitForClerk(timeoutMs) {
+      return new Promise((resolve) => {
+        if (window.Clerk) return resolve(window.Clerk);
+        const started = Date.now();
+        const timer = setInterval(() => {
+          if (window.Clerk) {
+            clearInterval(timer);
+            resolve(window.Clerk);
+          } else if (Date.now() - started > timeoutMs) {
+            clearInterval(timer);
+            resolve(null);
+          }
+        }, 50);
+      });
+    }
+
+    const clerkAppearance = {
+      variables: {
+        colorPrimary: "#8b5cf6",
+        colorBackground: "#2a2a2a",
+        colorInputBackground: "#202020",
+        colorInputText: "#ececec",
+        colorText: "#ececec",
+        colorTextSecondary: "#a8a8ac",
+        colorDanger: "#ef4444",
+        colorSuccess: "#10b981",
+        borderRadius: "10px",
+        fontFamily: "inherit",
+      },
+      elements: {
+        rootBox: { width: "100%" },
+        card: { boxShadow: "none", backgroundColor: "transparent", width: "100%" },
+      },
+    };
+
+    const errorEl = document.getElementById("signinError");
+    let synced = false;
+
+    function showFatal(message) {
+      errorEl.textContent = message;
+      errorEl.classList.remove("hidden");
+    }
+
+    async function syncWithBackend(Clerk) {
+      if (synced) return;
+      synced = true;
+      errorEl.classList.add("hidden");
+      try {
+        const token = (Clerk.session && (await Clerk.session.getToken())) || "";
+        const response = await fetch("/clerk-sync", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          credentials: "same-origin",
+          body: JSON.stringify({ token: token }),
+        });
+        const result = await response.json();
+        if (result.success) {
+          window.location.href = result.redirect;
+        } else if (result.needs_signup && result.redirect) {
+          window.location.href = result.redirect;
+        } else {
+          errorEl.textContent = result.error || "Sign-in could not be completed.";
+          errorEl.classList.remove("hidden");
+          synced = false;
+        }
+      } catch (err) {
+        errorEl.textContent = "Couldn't reach the server.";
+        errorEl.classList.remove("hidden");
+        synced = false;
+      }
+    }
+
+    waitForClerk(8000).then(async (Clerk) => {
+      if (!Clerk) {
+        showFatal("Sign-in could not load. Check your internet connection and Clerk configuration. You can still use the Face tab.");
+        return;
+      }
+      try {
+        await Clerk.load();
+        if (Clerk.user) {
+          syncWithBackend(Clerk);
+        } else {
+          Clerk.mountSignIn(document.getElementById("clerk-signin"), {
+            appearance: clerkAppearance,
+            routing: "path",
+            path: "{{ url_for('login') }}",
+            fallbackRedirectUrl: "{{ url_for('login') }}",
+            forceRedirectUrl: "{{ url_for('login') }}",
+            signInForceRedirectUrl: "{{ url_for('login') }}",
+            signInFallbackRedirectUrl: "{{ url_for('login') }}",
+          });
+          Clerk.addListener(({ user }) => {
+            if (user) syncWithBackend(Clerk);
+          });
+        }
+      } catch (err) {
+        showFatal("Sign-in failed to start: " + (err && err.message ? err.message : "unknown error"));
+      }
+    });
+  })();
+  {% endif %}
 </script>
 {% endblock %}

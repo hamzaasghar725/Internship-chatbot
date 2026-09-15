@@ -10,13 +10,16 @@ class User(UserMixin, db.Model):
     id = db.Column(db.Integer, primary_key=True)
     username = db.Column(db.String(80), unique=True, nullable=False)
     email = db.Column(db.String(120), unique=True, nullable=False)
-    password_hash = db.Column(db.String(255), nullable=False)
+    password_hash = db.Column(db.String(255), nullable=True)  # nullable: Clerk-created accounts don't set a local password
     face_embedding = db.Column(db.Text, nullable=True)  # JSON-encoded face vector
+    clerk_user_id = db.Column(db.String(64), unique=True, nullable=True, index=True)  # links to Clerk's user id, if signed up/in via Clerk
 
     def set_password(self, password):
         self.password_hash = generate_password_hash(password)
 
     def check_password(self, password):
+        if not self.password_hash:
+            return False
         return check_password_hash(self.password_hash, password)
 
     
@@ -29,6 +32,7 @@ class ChatHistory(db.Model):
     response = db.Column(db.Text, nullable=False)
     sources = db.Column(db.Text, nullable=True)  # comma-separated filenames
     timestamp = db.Column(db.DateTime, default=datetime.utcnow)
+    session_id = db.Column(db.String(36), nullable=True, index=True)  # groups messages into one "chat"
 
     user = db.relationship("User", backref=db.backref("chat_history", lazy=True))
 
@@ -39,4 +43,5 @@ class ChatHistory(db.Model):
             "response": self.response,
             "sources": self.sources.split(",") if self.sources else [],
             "timestamp": self.timestamp.isoformat(),
+            "session_id": self.session_id,
         }

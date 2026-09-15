@@ -2,82 +2,235 @@
 {% block title %}Sign Up{% endblock %}
 {% block content %}
 <div class="auth-container">
-    <form class="auth-card" method="POST" id="signupForm">
+    <div class="auth-card auth-card-clerk">
+        <div class="auth-logo">
+            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z"/><polyline points="14 2 14 8 20 8"/><line x1="16" y1="13" x2="8" y2="13"/><line x1="16" y1="17" x2="8" y2="17"/></svg>
+        </div>
         <h2>Sign Up</h2>
-        <input type="text" name="username" placeholder="Username" required>
-        <input type="email" name="email" placeholder="Email" required>
-        <input type="password" name="password" placeholder="Password" required>
 
-        <div class="face-capture-block">
-            <div class="face-frame" id="faceFrame">
-                <video id="signupVideo" autoplay muted playsinline></video>
-                <img id="signupPreview" class="face-preview hidden" alt="Captured face">
-            </div>
-            <canvas id="signupCanvas" class="hidden"></canvas>
-            <p id="faceStatus" class="face-status">Starting camera...</p>
-            <button type="button" id="captureBtn" class="face-btn">
-                <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M23 19a2 2 0 0 1-2 2H3a2 2 0 0 1-2-2V8a2 2 0 0 1 2-2h4l2-3h6l2 3h4a2 2 0 0 1 2 2z"/><circle cx="12" cy="13" r="4"/></svg>
-                Capture Face
-            </button>
-            <button type="button" id="retakeBtn" class="face-btn secondary hidden">
-                <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polyline points="1 4 1 10 7 10"/><path d="M3.51 15a9 9 0 1 0 2.13-9.36L1 10"/></svg>
-                Retake
-            </button>
+        {% if not clerk_enabled %}
+        <p class="clerk-setup-notice">
+            Clerk isn't configured yet. Add <code>CLERK_PUBLISHABLE_KEY</code>, <code>CLERK_SECRET_KEY</code>
+            and <code>CLERK_FRONTEND_API</code> to your <code>.env</code> file (see <code>.env.example</code>),
+            then restart the app.
+        </p>
+        {% else %}
+
+        <div id="signupClerkStep">
+            <div id="clerk-signup" class="clerk-mount"></div>
+            <div id="clerk-captcha"></div>
         </div>
 
-        <input type="hidden" name="face_image" id="faceImageInput">
-        <button type="submit" id="signupSubmit" disabled>
-            Create Account
-            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" style="width:16px;height:16px;vertical-align:-3px;margin-left:6px;"><line x1="5" y1="12" x2="19" y2="12"/><polyline points="12 5 19 12 12 19"/></svg>
-        </button>
+        <div id="signupFaceStep" class="hidden">
+            <p class="face-status">Almost done! Capture your face to finish creating your account — this is required so you can use Face Login.</p>
+            <div class="face-capture-block">
+                <div class="face-frame" id="faceFrame">
+                    <video id="signupVideo" autoplay muted playsinline></video>
+                    <img id="signupPreview" class="face-preview hidden" alt="Captured face">
+                </div>
+                <canvas id="signupCanvas" class="hidden"></canvas>
+                <p id="faceStatus" class="face-status">Starting camera...</p>
+                <button type="button" id="captureBtn" class="face-btn">
+                    <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M23 19a2 2 0 0 1-2 2H3a2 2 0 0 1-2-2V8a2 2 0 0 1 2-2h4l2-3h6l2 3h4a2 2 0 0 1 2 2z"/><circle cx="12" cy="13" r="4"/></svg>
+                    Capture Face
+                </button>
+                <button type="button" id="retakeBtn" class="face-btn secondary hidden">
+                    <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polyline points="1 4 1 10 7 10"/><path d="M3.51 15a9 9 0 1 0 2.13-9.36L1 10"/></svg>
+                    Retake
+                </button>
+            </div>
+
+            <button type="button" id="signupSubmit" disabled>
+                Finish Sign Up
+                <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" style="width:16px;height:16px;vertical-align:-3px;margin-left:6px;"><line x1="5" y1="12" x2="19" y2="12"/><polyline points="12 5 19 12 12 19"/></svg>
+            </button>
+            <p id="signupError" class="face-status hidden" style="color:#ff6b6b;"></p>
+        </div>
+
+        {% endif %}
+
         <p class="switch-link">Already have an account? <a href="{{ url_for('login') }}">Login</a></p>
-    </form>
+    </div>
 </div>
 
+{% if clerk_enabled %}
+<script
+  async
+  crossorigin="anonymous"
+  data-clerk-publishable-key="{{ clerk_publishable_key }}"
+  src="https://{{ clerk_frontend_api }}/npm/@clerk/clerk-js@latest/dist/clerk.browser.js"
+  type="text/javascript"
+></script>
 <script src="{{ url_for('static', filename='js/face-capture.js') }}"></script>
 <script>
-  const video = document.getElementById("signupVideo");
-  const preview = document.getElementById("signupPreview");
-  const canvas = document.getElementById("signupCanvas");
-  const status = document.getElementById("faceStatus");
-  const captureBtn = document.getElementById("captureBtn");
-  const retakeBtn = document.getElementById("retakeBtn");
-  const faceImageInput = document.getElementById("faceImageInput");
-  const submitBtn = document.getElementById("signupSubmit");
+(function () {
+  function waitForClerk() {
+    return new Promise((resolve) => {
+      if (window.Clerk) return resolve(window.Clerk);
+      const timer = setInterval(() => {
+        if (window.Clerk) {
+          clearInterval(timer);
+          resolve(window.Clerk);
+        }
+      }, 50);
+    });
+  }
+
+  const clerkAppearance = {
+    variables: {
+      colorPrimary: "#8b5cf6",
+      colorBackground: "#2a2a2a",
+      colorInputBackground: "#202020",
+      colorInputText: "#ececec",
+      colorText: "#ececec",
+      colorTextSecondary: "#a8a8ac",
+      colorDanger: "#ef4444",
+      colorSuccess: "#10b981",
+      borderRadius: "10px",
+      fontFamily: "inherit",
+    },
+    elements: {
+      rootBox: { width: "100%" },
+      card: { boxShadow: "none", backgroundColor: "transparent", width: "100%" },
+    },
+  };
+
+  const clerkStep = document.getElementById("signupClerkStep");
+  const faceStep = document.getElementById("signupFaceStep");
+  const errorEl = document.getElementById("signupError");
+  const finishBtn = document.getElementById("signupSubmit");
 
   let stream = null;
+  let faceDataUrl = "";
+  let movedToFaceStep = false;
+  let clerkRef = null;
 
-  (async () => {
+  async function initFaceCapture() {
+    const video = document.getElementById("signupVideo");
+    const preview = document.getElementById("signupPreview");
+    const canvas = document.getElementById("signupCanvas");
+    const status = document.getElementById("faceStatus");
+    const captureBtn = document.getElementById("captureBtn");
+    const retakeBtn = document.getElementById("retakeBtn");
+
     try {
       stream = await startCamera(video);
       status.textContent = "Center your face in the frame, then press Capture.";
     } catch (err) {
-      status.textContent = "Couldn't access the camera. Check browser permissions.";
+      // Face is required now, so a camera failure blocks sign-up rather than
+      // being skippable. Tell the user what to fix instead of dead-ending.
+      status.textContent =
+        "Camera access is required to finish sign-up. Allow camera permission in your browser, then reload this page.";
+      captureBtn.disabled = true;
     }
-  })();
 
-  captureBtn.addEventListener("click", () => {
-    const dataUrl = captureFrame(video, canvas);
-    faceImageInput.value = dataUrl;
-    preview.src = dataUrl;
-    preview.classList.remove("hidden");
-    video.classList.add("hidden");
-    captureBtn.classList.add("hidden");
-    retakeBtn.classList.remove("hidden");
-    submitBtn.disabled = false;
-    status.textContent = "Face captured. You can now create your account.";
-  });
+    captureBtn.addEventListener("click", () => {
+      faceDataUrl = captureFrame(video, canvas);
+      preview.src = faceDataUrl;
+      preview.classList.remove("hidden");
+      video.classList.add("hidden");
+      captureBtn.classList.add("hidden");
+      retakeBtn.classList.remove("hidden");
+      status.textContent = "Face captured. You can now finish sign-up.";
+      finishBtn.disabled = false;
+    });
 
-  retakeBtn.addEventListener("click", () => {
-    faceImageInput.value = "";
-    preview.classList.add("hidden");
-    video.classList.remove("hidden");
-    captureBtn.classList.remove("hidden");
-    retakeBtn.classList.add("hidden");
-    submitBtn.disabled = true;
-    status.textContent = "Center your face in the frame, then press Capture.";
+    retakeBtn.addEventListener("click", () => {
+      faceDataUrl = "";
+      preview.classList.add("hidden");
+      video.classList.remove("hidden");
+      captureBtn.classList.remove("hidden");
+      retakeBtn.classList.add("hidden");
+      status.textContent = "Center your face in the frame, then press Capture.";
+      finishBtn.disabled = true;
+    });
+  }
+
+  function showFaceStep() {
+    if (movedToFaceStep) return;
+    movedToFaceStep = true;
+    clerkStep.classList.add("hidden");
+    faceStep.classList.remove("hidden");
+    initFaceCapture();
+  }
+
+  async function completeSignup() {
+    // Belt-and-braces: the button is disabled until a capture exists, but
+    // never send an empty face to the backend.
+    if (!faceDataUrl) {
+      errorEl.textContent = "Please capture your face before finishing sign-up.";
+      errorEl.classList.remove("hidden");
+      return;
+    }
+
+    errorEl.classList.add("hidden");
+    finishBtn.disabled = true;
+    finishBtn.textContent = "Finishing...";
+
+    try {
+      let token = "";
+      if (clerkRef && clerkRef.session) {
+        token = (await clerkRef.session.getToken()) || "";
+      }
+      const response = await fetch("/signup-complete", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        credentials: "same-origin",
+        body: JSON.stringify({ token: token, face_image: faceDataUrl }),
+      });
+      const result = await response.json();
+
+      if (result.success) {
+        stopCamera(stream);
+        window.location.href = result.redirect;
+      } else {
+        errorEl.textContent = result.error || "Something went wrong. Please try again.";
+        errorEl.classList.remove("hidden");
+        finishBtn.disabled = false;
+        finishBtn.textContent = "Finish Sign Up";
+      }
+    } catch (err) {
+      errorEl.textContent = "Couldn't reach the server.";
+      errorEl.classList.remove("hidden");
+      finishBtn.disabled = false;
+      finishBtn.textContent = "Finish Sign Up";
+    }
+  }
+
+  finishBtn.addEventListener("click", completeSignup);
+
+  waitForClerk().then(async (Clerk) => {
+    clerkRef = Clerk;
+    await Clerk.load();
+
+    if (Clerk.user) {
+      showFaceStep();
+    } else {
+      Clerk.mountSignUp(document.getElementById("clerk-signup"), {
+        appearance: clerkAppearance,
+        routing: "path",
+        path: "{{ url_for('signup') }}",
+        // Google/Gmail (and any other OAuth strategy) completes sign-up via a
+        // full-page redirect to the provider and back -- without this, Clerk
+        // sends the browser to its default post-signup URL (which lands on
+        // "/", then bounces to /login since Flask isn't signed in yet),
+        // skipping the face-capture step below entirely. Forcing the
+        // redirect back to /signup makes OAuth behave the same as the
+        // in-widget email/password flow: land back here with Clerk.user set,
+        // so the "if (Clerk.user)" check below shows the face-capture step.
+        fallbackRedirectUrl: "{{ url_for('signup') }}",
+        forceRedirectUrl: "{{ url_for('signup') }}",
+        signUpForceRedirectUrl: "{{ url_for('signup') }}",
+        signUpFallbackRedirectUrl: "{{ url_for('signup') }}",
+      });
+      Clerk.addListener(({ user }) => {
+        if (user) showFaceStep();
+      });
+    }
   });
 
   window.addEventListener("beforeunload", () => stopCamera(stream));
+})();
 </script>
+{% endif %}
 {% endblock %}

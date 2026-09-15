@@ -1,0 +1,62 @@
+{% extends "base.html" %}
+{% block title %}Logging out...{% endblock %}
+{% block content %}
+<div class="auth-container">
+    <div class="auth-card auth-card-clerk" style="align-items:center; text-align:center;">
+        <p class="face-status">Logging you out...</p>
+    </div>
+</div>
+
+{% if clerk_enabled %}
+<script
+  async
+  crossorigin="anonymous"
+  data-clerk-publishable-key="{{ clerk_publishable_key }}"
+  src="https://{{ clerk_frontend_api }}/npm/@clerk/clerk-js@latest/dist/clerk.browser.js"
+  type="text/javascript"
+></script>
+{% endif %}
+<script>
+  (function () {
+    function waitForClerk(timeoutMs) {
+      return new Promise((resolve) => {
+        if (window.Clerk) return resolve(window.Clerk);
+        const started = Date.now();
+        const timer = setInterval(() => {
+          if (window.Clerk) {
+            clearInterval(timer);
+            resolve(window.Clerk);
+          } else if (Date.now() - started > timeoutMs) {
+            clearInterval(timer);
+            resolve(null); // give up gracefully -- still redirect below
+          }
+        }, 50);
+      });
+    }
+
+    function goToLogin() {
+      window.location.href = "{{ url_for('login') }}";
+    }
+
+    {% if clerk_enabled %}
+    waitForClerk(4000).then(async (Clerk) => {
+      try {
+        if (Clerk) {
+          await Clerk.load();
+          if (Clerk.user) {
+            await Clerk.signOut();
+          }
+        }
+      } catch (err) {
+        // Even if Clerk sign-out fails for some reason, still send the user
+        // to /login rather than stranding them on this page.
+      } finally {
+        goToLogin();
+      }
+    });
+    {% else %}
+    goToLogin();
+    {% endif %}
+  })();
+</script>
+{% endblock %}
