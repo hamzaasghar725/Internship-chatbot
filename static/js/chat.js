@@ -7,7 +7,6 @@ const summarizeBtn = document.getElementById("summarizeBtn");
 const documentInput = document.getElementById("documentInput");
 const uploadStatus = document.getElementById("uploadStatus");
 const micBtn = document.getElementById("micBtn");
-const voiceToggle = document.getElementById("voiceToggle");
 
 let lastUploadedFilename = null;
 
@@ -44,7 +43,7 @@ function formatMetrics(metrics) {
     return parts.join(" \u00b7 ");
 }
 
-function addMessage(text, sender, sources = [], metrics = null, speakIt = false) {
+function addMessage(text, sender, sources = [], metrics = null) {
     const div = document.createElement("div");
     div.className = `msg ${sender}`;
     div.textContent = text;
@@ -61,22 +60,58 @@ function addMessage(text, sender, sources = [], metrics = null, speakIt = false)
         met.textContent = metricsText;
         div.appendChild(met);
     }
+    if (sender === "bot") {
+        div.appendChild(createSpeakButton(text));
+    }
     chatBox.appendChild(div);
     if (chatScroll) chatScroll.scrollTop = chatScroll.scrollHeight;
-
-    // Read the bot's answer aloud if the "Read answers aloud" toggle is on.
-    // speakIt is only true for a fresh live answer, never for history loaded on page open.
-    if (speakIt && sender === "bot" && voiceToggle && voiceToggle.checked) {
-        speakText(text);
-    }
 }
 
-// ---- Text-to-Speech (bot reads its answer aloud) ----
-function speakText(text) {
+// ---- Text-to-Speech (a "listen" button under every bot answer) ----
+const SPEAK_ICON = `<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polygon points="11 5 6 9 2 9 2 15 6 15 11 19 11 5"/><path d="M19.07 4.93a10 10 0 0 1 0 14.14M15.54 8.46a5 5 0 0 1 0 7.07"/></svg><span>Listen</span>`;
+const STOP_ICON = `<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="6" y="6" width="12" height="12" rx="1"/></svg><span>Stop</span>`;
+
+let currentSpeakBtn = null; // the speak button (if any) currently reading aloud
+
+function createSpeakButton(text) {
+    const btn = document.createElement("button");
+    btn.type = "button";
+    btn.className = "speak-btn";
+    btn.title = "Read this answer aloud";
+    btn.innerHTML = SPEAK_ICON;
+    btn.addEventListener("click", () => speakText(text, btn));
+    return btn;
+}
+
+function resetSpeakButton(btn) {
+    if (!btn) return;
+    btn.innerHTML = SPEAK_ICON;
+    btn.title = "Read this answer aloud";
+}
+
+function speakText(text, btn = null) {
     if (!("speechSynthesis" in window)) return;
-    window.speechSynthesis.cancel(); // stop any answer currently being read
+
+    const clickedActiveButton = btn && currentSpeakBtn === btn;
+
+    window.speechSynthesis.cancel(); // stop whatever was being read, if anything
+    if (currentSpeakBtn) resetSpeakButton(currentSpeakBtn);
+    currentSpeakBtn = null;
+
+    if (clickedActiveButton) return; // clicking the button that's already reading just stops it
+
     const utterance = new SpeechSynthesisUtterance(text);
     utterance.lang = "en-US";
+    utterance.onend = utterance.onerror = () => {
+        resetSpeakButton(btn);
+        if (currentSpeakBtn === btn) currentSpeakBtn = null;
+    };
+
+    if (btn) {
+        btn.innerHTML = STOP_ICON;
+        btn.title = "Stop reading";
+        currentSpeakBtn = btn;
+    }
     window.speechSynthesis.speak(utterance);
 }
 
@@ -153,7 +188,7 @@ summarizeBtn.addEventListener("click", async () => {
         body: JSON.stringify({ filename: lastUploadedFilename })
     });
     const data = await res.json();
-    addMessage(data.summary || data.error, "bot", [], data.metrics, true);
+    addMessage(data.summary || data.error, "bot", [], data.metrics);
 });
 
 async function sendQuery() {
@@ -179,7 +214,7 @@ async function sendQuery() {
         }
     }
 
-    addMessage(data.answer || data.error, "bot", data.sources || [], data.metrics, true);
+    addMessage(data.answer || data.error, "bot", data.sources || [], data.metrics);
 }
 
 sendBtn.addEventListener("click", sendQuery);
