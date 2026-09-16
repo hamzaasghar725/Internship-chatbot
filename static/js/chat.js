@@ -1,4 +1,5 @@
 const chatBox = document.getElementById("chatBox");
+const chatScroll = document.querySelector(".chat-scroll"); // this is the element that actually scrolls (see style.css)
 const queryInput = document.getElementById("queryInput");
 const sendBtn = document.getElementById("sendBtn");
 const uploadBtn = document.getElementById("uploadBtn");
@@ -61,7 +62,7 @@ function addMessage(text, sender, sources = [], metrics = null, speakIt = false)
         div.appendChild(met);
     }
     chatBox.appendChild(div);
-    chatBox.scrollTop = chatBox.scrollHeight;
+    if (chatScroll) chatScroll.scrollTop = chatScroll.scrollHeight;
 
     // Read the bot's answer aloud if the "Read answers aloud" toggle is on.
     // speakIt is only true for a fresh live answer, never for history loaded on page open.

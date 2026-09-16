@@ -16,6 +16,7 @@ if not os.environ.get("SSL_CERT_FILE") or not os.path.exists(os.environ["SSL_CER
     os.environ["SSL_CERT_FILE"] = certifi.where()
 
 from langfuse import get_client, propagate_attributes
+from rag.prompt_registry import get_prompt
 
 # ---- Config ----
 EMBED_MODEL_NAME = "all-MiniLM-L6-v2"
@@ -154,6 +155,11 @@ def retrieve_relevant_chunks(user_id, query, top_k=4):
     return results
 
 
+GEMINI_TEMPERATURE = 0.3
+GEMINI_MAX_OUTPUT_TOKENS = 1024  # generous ceiling so real answers don't get cut off,
+                                 # but still a real, reportable model parameter
+
+
 def _post_to_gemini(model_name, api_key, prompt, max_retries=2):
     """
     Calls Gemini with one specific model name, retrying on temporary errors.
@@ -171,7 +177,10 @@ def _post_to_gemini(model_name, api_key, prompt, max_retries=2):
                 },
                 json={
                     "contents": [{"parts": [{"text": prompt}]}],
-                    "generationConfig": {"temperature": 0.3},
+                    "generationConfig": {
+                        "temperature": GEMINI_TEMPERATURE,
+                        "maxOutputTokens": GEMINI_MAX_OUTPUT_TOKENS,
+                    },
                 },
                 timeout=30,
             )
@@ -200,15 +209,21 @@ def _post_to_gemini(model_name, api_key, prompt, max_retries=2):
     raise last_error
 
 
-def _call_gemini(prompt, trace_name="gemini-call"):
+def _call_gemini(prompt, trace_name="gemini-call", metadata=None, langfuse_prompt=None):
     """
     Calls the Gemini REST API directly over HTTP (no SDK, to avoid
     protobuf/tensorflow version conflicts).
     Returns None if GEMINI_API_KEY is not set.
     Model names change over time (Google deprecates them), so we try
     several candidates until one works.
-    Logs the call (model, prompt, answer, token usage) to Langfuse if
-    LANGFUSE_PUBLIC_KEY is configured in .env; otherwise this is skipped.
+    Logs the call (model, prompt, answer, token usage, temperature,
+    max_completion_tokens, and any extra `metadata` passed in -- e.g. mode,
+    selected_sources) to Langfuse if LANGFUSE_PUBLIC_KEY is configured in
+    .env; otherwise this is skipped. This is what populates the Preview
+    panel's metadata table in the Langfuse UI.
+    `langfuse_prompt` (optional): the prompt object returned by
+    prompt_registry.get_prompt(). When provided, it's linked to this
+    generation so the Langfuse UI shows which prompt version produced it.
     """
     global _working_model_name
     api_key = os.environ.get("GEMINI_API_KEY")
@@ -230,6 +245,12 @@ def _call_gemini(prompt, trace_name="gemini-call"):
                     name=trace_name,
                     model=model_name,
                     input=prompt,
+                    model_parameters={
+                        "temperature": GEMINI_TEMPERATURE,
+                        "max_completion_tokens": GEMINI_MAX_OUTPUT_TOKENS,
+                    },
+                    metadata=metadata or {},
+                    prompt=langfuse_prompt,
                 ) as generation:
                     answer, token_usage = _post_to_gemini(model_name, api_key, prompt)
                     generation.update(output=answer, usage_details=token_usage)
@@ -326,30 +347,15 @@ def generate_answer(query, context_chunks):
     if not context_chunks:
         return "I couldn't find any content related to this question in your documents. Please upload a document first."
 
-    prompt = f"""You are answering questions about the user's uploaded document(s).
+    prompt, langfuse_prompt = get_prompt("rag-answer", context=context, question=query)
 
-Context retrieved from the document(s):
-{context}
-
-Question: {query}
-
-Rules for answering:
-1. First check whether the topic/term the question is about is actually mentioned
-   in the context above (even just by name, without full detail).
-2. If it IS mentioned (even briefly) -- give a complete, proper, correct answer
-   to the question using your own general knowledge, not just what little the
-   document says. The document only needs to establish that the topic is
-   relevant; it doesn't need to contain the full explanation. Prefer to also
-   weave in whatever the document itself adds (extra detail, the document's
-   specific angle, examples, figures) alongside the general explanation.
-3. If the topic/term is NOT mentioned anywhere in the context at all -- do not
-   answer it from general knowledge. Clearly say it isn't covered in the
-   uploaded document(s).
-4. Respond in English.
-
-Answer:"""
-
-    answer = _call_gemini(prompt, trace_name="rag-answer")
+    sources = list({c["source"] for c in context_chunks})
+    metadata = {
+        "mode": "chat",
+        "selected_sources": sources,
+        "context_chunks": len(context_chunks),
+    }
+    answer = _call_gemini(prompt, trace_name="rag-answer", metadata=metadata, langfuse_prompt=langfuse_prompt)
     if answer is None:
         # Fallback: no LLM available, just show the retrieved context directly
         return ("(GEMINI_API_KEY is not set, so showing the retrieved context directly)\n\n"
@@ -417,14 +423,14 @@ def _summarize_chunks(chunks, filename=None):
     # Limit text length for very long documents (to save on token budget)
     full_text = full_text[:12000]
 
-    prompt = f"""Write a concise summary (as bullet points) of the document below.
-Respond in English.
+    prompt, langfuse_prompt = get_prompt("doc-summary", document_text=full_text)
 
-{full_text}
-
-Summary:"""
-
-    summary = _call_gemini(prompt, trace_name="rag-summary-generation")
+    metadata = {
+        "mode": "summary",
+        "selected_sources": [filename] if filename else "all uploaded documents",
+        "context_chunks": len(chunks),
+    }
+    summary = _call_gemini(prompt, trace_name="rag-summary-generation", metadata=metadata, langfuse_prompt=langfuse_prompt)
     if summary is None:
         return ("(GEMINI_API_KEY is not set, so a summary could not be generated. "
                 "Showing a portion of the document below instead)\n\n" + full_text[:1000])
