@@ -1,13 +1,13 @@
 @import url('https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&display=swap');
 
 /* =========================================================================
-   Internship Chatbot — LibreChat-style dark UI
-   Sirf presentation layer. Koi bhi class / id naam badla nahi gaya, is liye
-   chat.js, face-capture.js aur Flask templates ka behaviour bilkul same hai.
+   Internship Chatbot — LibreChat-style UI (dark + light)
+   Sirf presentation layer. chat.js / face-capture.js jin ids-classes par
+   chalti hain wo sab waise hi hain, is liye working bilkul same rehti hai.
    ========================================================================= */
 
 :root {
-    /* Surfaces (screenshot se sample kiye gaye exact colors) */
+    /* Surfaces */
     --rail: #171717;
     --nav: #171717;
     --main: #212121;
@@ -21,20 +21,50 @@
     --text-mute: #8f8f8f;
     --text-faint: #6e6e6e;
 
-    /* Lines */
+    /* Lines & effects */
     --line: rgba(255, 255, 255, 0.09);
     --line-strong: rgba(255, 255, 255, 0.16);
+    --shadow: rgba(0, 0, 0, 0.5);
+    --overlay: rgba(0, 0, 0, 0.62);
+    --scroll: rgba(255, 255, 255, 0.13);
+    --scroll-hover: rgba(255, 255, 255, 0.22);
+
+    /* Inverted (solid) buttons */
+    --invert-fg: #171717;
+    --invert-hover: #ffffff;
 
     /* Accents */
     --brand-a: #22d3ee;
     --brand-b: #6d28d9;
     --avatar: #58812d;
     --danger: #f2555a;
-    --ok: #4ade80;
 
     --rail-w: 52px;
     --nav-w: 260px;
-    --radius: 12px;
+}
+
+:root[data-theme="light"] {
+    --rail: #efefef;
+    --nav: #f9f9f9;
+    --main: #ffffff;
+    --raised: #f1f1f1;
+    --raised-hover: #e6e6e6;
+    --circle: #d7d7d7;
+
+    --text: #101010;
+    --text-soft: #4a4a4a;
+    --text-mute: #6c6c6c;
+    --text-faint: #8e8e8e;
+
+    --line: rgba(0, 0, 0, 0.10);
+    --line-strong: rgba(0, 0, 0, 0.17);
+    --shadow: rgba(0, 0, 0, 0.16);
+    --overlay: rgba(255, 255, 255, 0.72);
+    --scroll: rgba(0, 0, 0, 0.16);
+    --scroll-hover: rgba(0, 0, 0, 0.28);
+
+    --invert-fg: #ffffff;
+    --invert-hover: #000000;
 }
 
 * {
@@ -90,6 +120,11 @@ input:focus-visible {
     display: none !important;
 }
 
+/* Chhupa hua control -- programmatically .click() phir bhi chalta hai */
+.hidden-control {
+    display: none !important;
+}
+
 .visually-hidden-input {
     position: absolute;
     width: 1px;
@@ -109,12 +144,12 @@ input:focus-visible {
 }
 
 ::-webkit-scrollbar-thumb {
-    background: rgba(255, 255, 255, 0.13);
+    background: var(--scroll);
     border-radius: 99px;
 }
 
 ::-webkit-scrollbar-thumb:hover {
-    background: rgba(255, 255, 255, 0.22);
+    background: var(--scroll-hover);
 }
 
 /* ---------- Flash messages ---------- */
@@ -204,20 +239,21 @@ input:focus-visible {
     color: var(--text);
 }
 
-.rail-btn.is-active {
-    background: var(--raised);
-    color: var(--text);
-}
-
-.rail-divider {
-    width: 22px;
-    height: 1px;
-    background: var(--line-strong);
-    margin: 7px 0;
-}
-
 .rail-spacer {
     flex: 1;
+}
+
+/* theme icons: dark me moon, light me sun */
+.icon-sun {
+    display: none;
+}
+
+:root[data-theme="light"] .icon-sun {
+    display: block;
+}
+
+:root[data-theme="light"] .icon-moon {
+    display: none;
 }
 
 .rail-avatar {
@@ -234,9 +270,9 @@ input:focus-visible {
     user-select: none;
 }
 
-/* user popup (avatar par click) */
 .rail-user {
     position: relative;
+    margin-top: 6px;
 }
 
 .user-menu {
@@ -248,7 +284,7 @@ input:focus-visible {
     border: 1px solid var(--line);
     border-radius: 12px;
     padding: 6px;
-    box-shadow: 0 16px 40px rgba(0, 0, 0, 0.5);
+    box-shadow: 0 16px 40px var(--shadow);
     z-index: 60;
 }
 
@@ -298,13 +334,12 @@ input:focus-visible {
     height: 100%;
     display: flex;
     flex-direction: column;
-    padding: 10px 8px 10px;
+    padding: 10px 8px;
 }
 
 .sidebar-top {
     display: flex;
     align-items: center;
-    justify-content: space-between;
     padding: 4px 6px 12px;
 }
 
@@ -340,28 +375,43 @@ input:focus-visible {
     text-overflow: ellipsis;
 }
 
-.sidebar-icon-btn {
-    width: 28px;
-    height: 28px;
-    display: grid;
-    place-items: center;
-    border-radius: 7px;
-    color: var(--text-soft);
-    flex: none;
-    transition: background 0.14s ease, color 0.14s ease;
+/* ---------- Chat search ---------- */
+.search-wrap {
+    position: relative;
+    margin-bottom: 4px;
 }
 
-.sidebar-icon-btn svg {
-    width: 16px;
-    height: 16px;
+.search-wrap svg {
+    position: absolute;
+    left: 11px;
+    top: 50%;
+    transform: translateY(-50%);
+    width: 15px;
+    height: 15px;
+    color: var(--text-mute);
+    pointer-events: none;
 }
 
-.sidebar-icon-btn:hover {
+.search-wrap input {
+    width: 100%;
+    padding: 9px 10px 9px 33px;
+    border-radius: 10px;
     background: var(--raised);
+    border: 1px solid transparent;
     color: var(--text);
+    font-size: 13px;
 }
 
-/* section header ("Document", "Chats") */
+.search-wrap input::placeholder {
+    color: var(--text-mute);
+}
+
+.search-wrap input:focus {
+    outline: none;
+    border-color: var(--line-strong);
+}
+
+/* ---------- Sections ---------- */
 .sidebar-section {
     margin-bottom: 6px;
 }
@@ -371,122 +421,14 @@ input:focus-visible {
     align-items: center;
     justify-content: space-between;
     gap: 6px;
-    padding: 6px 6px 6px 8px;
+    padding: 10px 6px 4px 8px;
 }
 
 .section-title {
-    display: flex;
-    align-items: center;
-    gap: 6px;
     font-size: 13.5px;
     font-weight: 600;
     color: var(--text);
     letter-spacing: 0.02em;
-}
-
-.section-title svg {
-    width: 14px;
-    height: 14px;
-    color: var(--text-soft);
-}
-
-/* ---------- Document block ---------- */
-.file-pill {
-    display: flex;
-    align-items: center;
-    gap: 9px;
-    padding: 9px 10px;
-    border-radius: 9px;
-    color: var(--text-soft);
-    font-size: 13.5px;
-    cursor: pointer;
-    transition: background 0.14s ease, color 0.14s ease;
-}
-
-.file-pill svg {
-    width: 16px;
-    height: 16px;
-    flex: none;
-}
-
-.file-pill span {
-    white-space: nowrap;
-    overflow: hidden;
-    text-overflow: ellipsis;
-}
-
-.file-pill:hover {
-    background: var(--raised);
-    color: var(--text);
-}
-
-.sidebar-btn-row {
-    display: flex;
-    gap: 6px;
-    padding: 2px 4px 0;
-}
-
-.btn {
-    display: inline-flex;
-    align-items: center;
-    justify-content: center;
-    gap: 6px;
-    border-radius: 9px;
-    font-weight: 500;
-    transition: background 0.14s ease, border-color 0.14s ease, opacity 0.14s ease;
-    white-space: nowrap;
-}
-
-.btn svg {
-    width: 15px;
-    height: 15px;
-}
-
-.btn-sm {
-    padding: 8px 10px;
-    font-size: 12.5px;
-    flex: 1;
-}
-
-.btn-md {
-    padding: 11px 16px;
-    font-size: 14px;
-}
-
-.btn-primary {
-    background: var(--text);
-    color: #171717;
-}
-
-.btn-primary:hover {
-    background: #fff;
-}
-
-.btn-primary:active {
-    transform: translateY(1px);
-}
-
-.btn-primary:disabled {
-    opacity: 0.5;
-    cursor: not-allowed;
-}
-
-.btn-secondary {
-    background: var(--raised);
-    color: var(--text);
-    border: 1px solid var(--line);
-}
-
-.btn-secondary:hover {
-    background: var(--raised-hover);
-}
-
-.upload-status {
-    padding: 7px 8px 2px;
-    font-size: 12px;
-    color: var(--text-mute);
-    line-height: 1.45;
-    word-break: break-word;
 }
 
 /* ---------- Chat list ---------- */
@@ -495,7 +437,6 @@ input:focus-visible {
     flex-direction: column;
     flex: 1;
     min-height: 0;
-    margin-top: 4px;
 }
 
 .chat-list {
@@ -510,7 +451,7 @@ input:focus-visible {
 }
 
 .chat-list-empty {
-    padding: 10px 10px;
+    padding: 10px;
     font-size: 13px;
     color: var(--text-faint);
 }
@@ -534,10 +475,7 @@ input:focus-visible {
     transition: background 0.13s ease;
 }
 
-.chat-item-row:hover {
-    background: var(--raised);
-}
-
+.chat-item-row:hover,
 .chat-item-row.active {
     background: var(--raised);
 }
@@ -551,15 +489,13 @@ input:focus-visible {
     color: var(--text-soft);
     white-space: nowrap;
     overflow: hidden;
-    /* screenshot jaisa right-side fade */
+    /* right side par halka fade, LibreChat jaisa */
     -webkit-mask-image: linear-gradient(to right, #000 calc(100% - 26px), transparent 100%);
     mask-image: linear-gradient(to right, #000 calc(100% - 26px), transparent 100%);
 }
 
-.chat-item:hover,
-.chat-item.active,
-.chat-item-row.active .chat-item,
-.chat-item-row:hover .chat-item {
+.chat-item-row:hover .chat-item,
+.chat-item-row.active .chat-item {
     color: var(--text);
 }
 
@@ -617,6 +553,47 @@ input:focus-visible {
     border-color: var(--brand-a);
 }
 
+/* ---------- Document strip (sirf status dikhata hai) ---------- */
+.sidebar-doc {
+    border-top: 1px solid var(--line);
+    padding-top: 6px;
+    margin-top: 4px;
+}
+
+.doc-strip {
+    display: flex;
+    align-items: center;
+    gap: 9px;
+    padding: 9px 10px;
+    border-radius: 9px;
+    font-size: 13px;
+    color: var(--text-mute);
+}
+
+.doc-strip svg {
+    width: 15px;
+    height: 15px;
+    flex: none;
+}
+
+.doc-strip span {
+    white-space: nowrap;
+    overflow: hidden;
+    text-overflow: ellipsis;
+}
+
+.doc-strip.is-loaded {
+    color: var(--text);
+}
+
+.upload-status {
+    padding: 0 10px 4px;
+    font-size: 11.5px;
+    color: var(--text-mute);
+    line-height: 1.45;
+    word-break: break-word;
+}
+
 /* ---------- Scrim (mobile) ---------- */
 .sidebar-scrim {
     display: none;
@@ -630,6 +607,7 @@ input:focus-visible {
    MAIN PANEL
    ========================================================================= */
 .main-panel {
+    position: relative;
     flex: 1;
     min-width: 0;
     display: flex;
@@ -643,25 +621,6 @@ input:focus-visible {
     gap: 8px;
     padding: 10px 14px;
     flex: none;
-}
-
-.mobile-sidebar-toggle {
-    display: none;
-    width: 36px;
-    height: 36px;
-    border-radius: 9px;
-    place-items: center;
-    color: var(--text-soft);
-}
-
-.mobile-sidebar-toggle svg {
-    width: 19px;
-    height: 19px;
-}
-
-.mobile-sidebar-toggle:hover {
-    background: var(--raised);
-    color: var(--text);
 }
 
 .model-pill {
@@ -685,34 +644,32 @@ input:focus-visible {
     flex: none;
 }
 
-.header-icon-btn {
-    width: 38px;
-    height: 38px;
-    display: grid;
-    place-items: center;
-    border: 1px solid var(--line);
-    border-radius: 11px;
-    color: var(--text-soft);
-    transition: background 0.14s ease, color 0.14s ease;
-}
-
-.header-icon-btn svg {
-    width: 17px;
-    height: 17px;
-}
-
-.header-icon-btn:hover {
-    background: var(--raised);
-    color: var(--text);
-}
-
 .header-spacer {
     flex: 1;
 }
 
-.header-icon-btn.dashed {
-    border-style: dashed;
-    border-color: var(--line-strong);
+.header-action-btn {
+    display: inline-flex;
+    align-items: center;
+    gap: 7px;
+    padding: 8px 13px;
+    border: 1px solid var(--line);
+    border-radius: 11px;
+    font-size: 13.5px;
+    font-weight: 500;
+    color: var(--text-soft);
+    white-space: nowrap;
+    transition: background 0.14s ease, color 0.14s ease;
+}
+
+.header-action-btn svg {
+    width: 16px;
+    height: 16px;
+}
+
+.header-action-btn:hover {
+    background: var(--raised);
+    color: var(--text);
 }
 
 /* ---------- Conversation area ---------- */
@@ -731,7 +688,7 @@ input:focus-visible {
     scroll-behavior: smooth;
 }
 
-/* jab koi message nahi: hero + composer screen ke beech me (screenshot jaisa) */
+/* koi message nahi: hero + composer beech me */
 .conversation.is-empty {
     justify-content: center;
 }
@@ -746,7 +703,8 @@ input:focus-visible {
     left: 0;
     right: 0;
     bottom: 12px;
-    margin: 0;
+    max-width: 100%;
+    padding: 0 20px;
 }
 
 .welcome-screen {
@@ -791,6 +749,31 @@ input:focus-visible {
 .welcome-subtitle {
     font-size: 14.5px;
     color: var(--text-soft);
+}
+
+/* ---------- Starter chips ---------- */
+.starter-chips {
+    display: flex;
+    flex-wrap: wrap;
+    justify-content: center;
+    gap: 8px;
+    max-width: 560px;
+    margin-top: 14px;
+}
+
+.chip {
+    padding: 9px 14px;
+    border: 1px solid var(--line);
+    border-radius: 999px;
+    font-size: 13px;
+    color: var(--text-soft);
+    transition: background 0.14s ease, color 0.14s ease, border-color 0.14s ease;
+}
+
+.chip:hover {
+    background: var(--raised);
+    border-color: var(--line-strong);
+    color: var(--text);
 }
 
 /* ---------- Messages ---------- */
@@ -876,6 +859,7 @@ input:focus-visible {
     align-items: center;
     gap: 6px;
     margin-top: 11px;
+    margin-right: 7px;
     padding: 6px 11px;
     border-radius: 8px;
     border: 1px solid var(--line);
@@ -899,10 +883,94 @@ input:focus-visible {
     border-color: var(--line-strong);
 }
 
+/* ---------- Typing indicator ---------- */
+.typing-row {
+    display: flex;
+    align-items: center;
+    gap: 12px;
+    max-width: 760px;
+    margin: -8px auto 0;
+    padding: 0 20px 26px;
+}
+
+.typing-avatar {
+    width: 26px;
+    height: 26px;
+    border-radius: 50%;
+    background: linear-gradient(145deg, var(--brand-a), var(--brand-b));
+    flex: none;
+}
+
+.typing-dots {
+    display: inline-flex;
+    gap: 5px;
+    align-items: center;
+}
+
+.typing-dots i {
+    width: 7px;
+    height: 7px;
+    border-radius: 50%;
+    background: var(--text-mute);
+    animation: typing-bounce 1.1s ease-in-out infinite;
+}
+
+.typing-dots i:nth-child(2) {
+    animation-delay: 0.16s;
+}
+
+.typing-dots i:nth-child(3) {
+    animation-delay: 0.32s;
+}
+
+@keyframes typing-bounce {
+
+    0%,
+    70%,
+    100% {
+        opacity: 0.32;
+        transform: translateY(0);
+    }
+
+    35% {
+        opacity: 1;
+        transform: translateY(-4px);
+    }
+}
+
 /* ---------- Composer ---------- */
 .composer {
+    position: relative;
     flex: none;
-    padding: 6px 20px 14px;
+    padding: 6px 20px 10px;
+}
+
+.scroll-bottom-btn {
+    position: absolute;
+    top: -40px;
+    left: 50%;
+    transform: translateX(-50%);
+    width: 34px;
+    height: 34px;
+    display: grid;
+    place-items: center;
+    border-radius: 50%;
+    background: var(--raised);
+    border: 1px solid var(--line);
+    color: var(--text-soft);
+    box-shadow: 0 6px 18px var(--shadow);
+    z-index: 5;
+    transition: background 0.14s ease, color 0.14s ease;
+}
+
+.scroll-bottom-btn svg {
+    width: 17px;
+    height: 17px;
+}
+
+.scroll-bottom-btn:hover {
+    background: var(--raised-hover);
+    color: var(--text);
 }
 
 .composer-inner {
@@ -1004,24 +1072,65 @@ input:focus-visible {
 }
 
 .composer-send-btn:hover {
-    background: #4d4d4d;
+    background: var(--raised-hover);
 }
 
 .composer-send-btn.is-active {
     background: var(--text);
-    color: #171717;
+    color: var(--invert-fg);
 }
 
 .composer-send-btn.is-active:hover {
-    background: #fff;
+    background: var(--invert-hover);
 }
 
 .composer-hint {
+    flex: none;
     max-width: 760px;
-    margin: 10px auto 0;
+    margin: 0 auto;
+    padding: 0 20px 12px;
     text-align: center;
     font-size: 11.5px;
     color: var(--text-faint);
+}
+
+/* ---------- Drag & drop ---------- */
+.drop-overlay {
+    position: absolute;
+    inset: 0;
+    z-index: 70;
+    display: grid;
+    place-items: center;
+    background: var(--overlay);
+    backdrop-filter: blur(2px);
+}
+
+.drop-card {
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    gap: 8px;
+    padding: 34px 44px;
+    border: 2px dashed var(--line-strong);
+    border-radius: 18px;
+    color: var(--text);
+    text-align: center;
+}
+
+.drop-card svg {
+    width: 34px;
+    height: 34px;
+    color: var(--text-soft);
+}
+
+.drop-card strong {
+    font-size: 16px;
+    font-weight: 600;
+}
+
+.drop-card span {
+    font-size: 12.5px;
+    color: var(--text-mute);
 }
 
 /* =========================================================================
@@ -1104,7 +1213,7 @@ input:focus-visible {
     padding: 12px 16px;
     border-radius: 11px;
     background: var(--text);
-    color: #171717;
+    color: var(--invert-fg);
     font-size: 14px;
     font-weight: 600;
     transition: background 0.14s ease, opacity 0.14s ease;
@@ -1113,7 +1222,7 @@ input:focus-visible {
 .auth-card button[type="submit"]:hover,
 .login-panel button[type="submit"]:hover,
 #signupSubmit:hover:not(:disabled) {
-    background: #fff;
+    background: var(--invert-hover);
 }
 
 .auth-card button[type="submit"]:disabled,
@@ -1221,7 +1330,7 @@ input:focus-visible {
     padding: 11px 16px;
     border-radius: 11px;
     background: var(--text);
-    color: #171717;
+    color: var(--invert-fg);
     font-size: 13.5px;
     font-weight: 600;
     transition: background 0.14s ease, opacity 0.14s ease;
@@ -1233,7 +1342,7 @@ input:focus-visible {
 }
 
 .face-btn:hover {
-    background: #fff;
+    background: var(--invert-hover);
 }
 
 .face-btn:disabled {
@@ -1299,10 +1408,6 @@ input:focus-visible {
 }
 
 @media (max-width: 860px) {
-    .mobile-sidebar-toggle {
-        display: grid;
-    }
-
     .icon-rail {
         --rail-w: 48px;
     }
@@ -1331,18 +1436,27 @@ input:focus-visible {
 
     .chat-box,
     .composer-inner,
-    .composer-hint {
+    .composer-hint,
+    .typing-row {
         max-width: 100%;
     }
 }
 
 @media (max-width: 640px) {
     .composer {
-        padding: 6px 12px 12px;
+        padding: 6px 12px 8px;
+    }
+
+    .composer-hint {
+        padding: 0 12px 10px;
     }
 
     .chat-box {
         padding: 14px 12px 20px;
+    }
+
+    .typing-row {
+        padding: 0 12px 20px;
     }
 
     .msg.user {
@@ -1359,10 +1473,9 @@ input:focus-visible {
         font-size: 13px;
     }
 
-    .header-icon-btn,
-    .mobile-sidebar-toggle {
-        width: 34px;
-        height: 34px;
+    .header-action-btn {
+        padding: 7px 11px;
+        font-size: 12.5px;
     }
 
     .welcome-brand {
@@ -1376,6 +1489,15 @@ input:focus-visible {
 
     .welcome-subtitle {
         font-size: 13.5px;
+    }
+
+    .starter-chips {
+        max-width: 100%;
+    }
+
+    .chip {
+        font-size: 12.5px;
+        padding: 8px 12px;
     }
 
     .auth-card {
