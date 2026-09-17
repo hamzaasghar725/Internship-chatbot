@@ -46,7 +46,32 @@ function formatMetrics(metrics) {
 function addMessage(text, sender, sources = [], metrics = null) {
     const div = document.createElement("div");
     div.className = `msg ${sender}`;
-    div.textContent = text;
+
+    // ---- Answer formatting ----
+    // Bot ke jawab markdown me aate hain (**bold**, ## heading, bullets,
+    // tables). Pehle yahan `div.textContent = text` tha, jis ki wajah se
+    // markdown render hone ke bajaye screen par kache asterisks dikhte the.
+    // Ab bot ke messages MarkdownRenderer se guzar kar asli formatting
+    // (bold, headings, lists, tables) ban jate hain.
+    //
+    // User ka apna message plain text hi rehta hai -- us par formatting
+    // lagane ka koi faida nahi, aur na hi uske asterisks badalne chahiye.
+    const plainText = (sender === "bot" && window.MarkdownRenderer)
+        ? window.MarkdownRenderer.toPlainText(text)
+        : text;
+
+    if (sender === "bot" && window.MarkdownRenderer) {
+        div.appendChild(window.MarkdownRenderer.toElement(text));
+    } else {
+        div.textContent = text;
+    }
+
+    // Copy button (chat.html) aur Listen button dono ko saaf text chahiye --
+    // markdown symbols ke baghair. Raw markdown bhi rakh lete hain taake
+    // baad me "copy as markdown" jaisa feature add karna asaan rahe.
+    div.__plainText = plainText;
+    div.__rawText = text;
+
     if (sources.length > 0) {
         const src = document.createElement("div");
         src.className = "sources";
@@ -61,7 +86,9 @@ function addMessage(text, sender, sources = [], metrics = null) {
         div.appendChild(met);
     }
     if (sender === "bot") {
-        div.appendChild(createSpeakButton(text));
+        // Text-to-speech ko plain text milta hai, warna screen reader
+        // "star star Skills star star" jaisa bolta hai.
+        div.appendChild(createSpeakButton(plainText));
     }
     chatBox.appendChild(div);
     if (chatScroll) chatScroll.scrollTop = chatScroll.scrollHeight;
@@ -166,6 +193,8 @@ uploadBtn.addEventListener("click", async () => {
     }
     const formData = new FormData();
     formData.append("document", file);
+    // Langfuse par upload ka trace usi conversation ke sath group ho jaye.
+    if (currentSessionId) formData.append("session_id", currentSessionId);
 
     uploadStatus.textContent = "Uploading...";
     const res = await fetch("/upload", { method: "POST", body: formData });

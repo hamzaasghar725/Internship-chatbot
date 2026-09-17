@@ -165,6 +165,9 @@
     </main>
 </div>
 
+<!-- markdown.js chat.js se PEHLE load hota hai: chat.js window.MarkdownRenderer
+     use karti hai bot ke jawab ko bold/headings/lists me badalne ke liye. -->
+<script src="{{ url_for('static', filename='js/markdown.js') }}"></script>
 <script src="{{ url_for('static', filename='js/chat.js') }}"></script>
 <script>
 // ---- UI wiring for the LibreChat-style layout ----
@@ -229,8 +232,13 @@
     function addCopyButtons() {
         chatBox.querySelectorAll(".msg.bot:not([data-copy-ready])").forEach((msg) => {
             msg.setAttribute("data-copy-ready", "1");
-            const textNode = Array.from(msg.childNodes).find((n) => n.nodeType === 3);
-            const text = textNode ? textNode.nodeValue : msg.innerText;
+            // Jawab ab rendered HTML hai (bold, lists, tables), is liye purana
+            // "pehla text node uthao" tareeqa kaam nahi karta. chat.js har
+            // message par __plainText rakh deti hai -- wahi copy hota hai,
+            // yani jo screen par dikh raha hai, bilkul wahi, markdown symbols
+            // ke baghair. Fallback me content div ka innerText le lete hain.
+            const contentEl = msg.querySelector(".msg-content");
+            const text = msg.__plainText || (contentEl ? contentEl.innerText : msg.innerText);
 
             const btn = document.createElement("button");
             btn.type = "button";

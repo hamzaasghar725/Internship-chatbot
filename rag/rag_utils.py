@@ -2,6 +2,7 @@ import os
 import pickle
 import re
 import time
+from contextlib import contextmanager, nullcontext
 import numpy as np
 import faiss
 from PyPDF2 import PdfReader
@@ -62,6 +63,168 @@ def get_embed_model():
     return _embed_model
 
 
+# ==========================================================================
+# Langfuse tracing helpers
+# ==========================================================================
+# Ye helpers jo trace banate hain, uski shakal Langfuse dashboard par aisi
+# nazar aati hai:
+#
+#   rag-chat                    (root span)
+#     |- chat-request           (event)      sawal aaya: length, top_k
+#     |- embedding              (span)       query -> vector  [kitna waqt]
+#     |- retrieval              (retriever)  FAISS search     [kitna waqt]
+#     |- mode-selected          (event)      rag ya general-chat, aur kyun
+#     |- rag-answer             (generation) Gemini call + tokens + cost
+#     |- chat-completed         (event)      answerLength, sourceCount
+#
+#   document-ingest             (root span)
+#     |- extract-text           (span)       PDF/TXT se text nikalna
+#     |- chunking               (span)       chunkCount, avg chunk size
+#     |- embedding              (span)       vectors, dimensions
+#     |- index-write            (span)       FAISS index disk par likhna
+#
+# Pehle sirf retrieval aur generation nazar aate the, is liye ye pata hi
+# nahi chalta tha ke waqt kahan ja raha hai -- embedding me, FAISS search
+# me, ya Gemini me. Ab har step ka apna span hai.
+#
+# SAB SE AHEM USOOL: tracing kabhi bhi chat ko nahi tor sakti. Har helper
+# try/except me hai aur Langfuse na ho to sab kuch chup chaap normal chalta
+# rehta hai -- yehi wajah hai ke ab code ka ek hi raasta hai, pehle ki tarah
+# "agar langfuse hai to ye, warna wo" wali do alag copies nahi.
+
+APP_RELEASE = os.environ.get("APP_RELEASE", "1.0.0")
+LANGFUSE_ENVIRONMENT = os.environ.get("LANGFUSE_ENVIRONMENT", "production")
+TRACE_APP_TAG = "internship-chatbot"  # har trace par lagta hai, filter karne ke liye
+
+# Langfuse ye do values client banate waqt environment se uthata hai, is
+# liye inhe get_client() se PEHLE set karna zaroori hai. Isi se dashboard
+# par "Env: production" aur "Release: 1.0.0" wale badges aate hain.
+os.environ.setdefault("LANGFUSE_TRACING_ENVIRONMENT", LANGFUSE_ENVIRONMENT)
+os.environ.setdefault("LANGFUSE_RELEASE", APP_RELEASE)
+
+_trace_warned = set()
+
+
+def _trace_warn(key, error):
+    """Ek hi tracing warning console me baar baar na chhape."""
+    if key in _trace_warned:
+        return
+    _trace_warned.add(key)
+    print(f"[Langfuse] '{key}' skipped ({error}) -- tracing degraded, chat unaffected.")
+
+
+@contextmanager
+def _observe(langfuse, name, as_type="span", **kwargs):
+    """
+    Langfuse observation kholta hai aur uska handle deta hai.
+
+    Langfuse configured na ho -- ya span khulne me koi masla ho -- to `None`
+    milta hai aur `with` block bilkul normally chalta rehta hai. Yani call
+    karne wale code ko kabhi check nahi karna parta ke tracing on hai ya nahi.
+
+    Note: span banane ki ghalti yahan pakri jati hai, lekin `with` block ke
+    ANDAR ki asli ghalti upar jati hai -- warna chat ka error tracing ke
+    peeche chhup jata.
+    """
+    ctx = None
+    if langfuse is not None:
+        try:
+            ctx = langfuse.start_as_current_observation(name=name, as_type=as_type, **kwargs)
+        except Exception as e:
+            _trace_warn(f"span:{name}", e)
+    if ctx is None:
+        yield None
+        return
+    with ctx as observation:
+        yield observation
+
+
+def _attributes(langfuse, **kwargs):
+    """propagate_attributes() ka safe version (Langfuse na ho to no-op)."""
+    if langfuse is None:
+        return nullcontext()
+    try:
+        return propagate_attributes(**kwargs)
+    except Exception as e:
+        _trace_warn("propagate_attributes", e)
+        return nullcontext()
+
+
+def _update(observation, **kwargs):
+    """span.update() ka safe version."""
+    if observation is None:
+        return
+    try:
+        observation.update(**kwargs)
+    except Exception as e:
+        _trace_warn("observation.update", e)
+
+
+def _emit_event(langfuse, name, metadata=None):
+    """
+    Trace par ek point-in-time event lagata hai (span ki tarah duration
+    nahi hoti -- sirf "ye hua, is waqt"). Dashboard par ye chhote circle
+    wale nodes bante hain: chat-request, mode-selected, chat-completed.
+
+    SDK versions me method ka naam alag ho sakta hai, is liye pehle
+    create_event() try karte hain, phir event-type observation.
+    """
+    if langfuse is None:
+        return
+    payload = metadata or {}
+    try:
+        langfuse.create_event(name=name, metadata=payload)
+        return
+    except Exception as e:
+        # Python `except ... as e` block ke baad `e` khud delete kar deta
+        # hai, is liye message ko abhi alag variable me mehfooz karte hain.
+        first_error = str(e)
+    try:
+        with langfuse.start_as_current_observation(name=name, as_type="event", metadata=payload):
+            pass
+    except Exception:
+        _trace_warn(f"event:{name}", first_error)
+
+
+def _tag_trace(langfuse, tags=None, output=None):
+    """
+    Poore trace par tags aur ek structured output lagata hai.
+
+    Tags hi wo cheez hain jin se dashboard par filter lagta hai -- misaal ke
+    taur par sirf wo sawal dekhna jinme document use hi nahi hua
+    ("no-context"), ya sirf ingestion traces.
+    """
+    if langfuse is None:
+        return
+    kwargs = {}
+    if tags:
+        kwargs["tags"] = [t for t in tags if t]
+    if output is not None:
+        kwargs["output"] = output
+    if not kwargs:
+        return
+    try:
+        langfuse.update_current_trace(**kwargs)
+    except Exception as e:
+        _trace_warn("update_current_trace", e)
+
+
+def _flush(langfuse):
+    """Trace ko foran Langfuse bhej deta hai (warna batch me atka rehta hai)."""
+    if langfuse is None:
+        return
+    try:
+        langfuse.flush()
+    except Exception as e:
+        _trace_warn("flush", e)
+
+
+def _user_has_index(user_id):
+    """True agar is user ne koi document upload kar rakha hai."""
+    index_path, _ = _paths_for_user(user_id)
+    return os.path.exists(index_path)
+
+
 def extract_text(file_path):
     """Extracts text from a PDF or TXT file."""
     if file_path.lower().endswith(".pdf"):
@@ -95,45 +258,150 @@ def _paths_for_user(user_id):
     return index_path, meta_path
 
 
-def build_or_update_index(user_id, file_path, filename):
+def build_or_update_index(user_id, file_path, filename, session_id=None):
     """
     Processes a new document and builds a fresh FAISS index for the user,
     replacing any previously uploaded document. Each user has their own
     separate index (uploads stay private), and only the most recently
     uploaded document is searchable at any given time.
+
+    Langfuse par ye poora pipeline ek "document-ingest" trace banata hai
+    jiske andar chaar spans hain: extract-text, chunking, embedding,
+    index-write. Is se dashboard par saaf nazar aata hai ke 20-page PDF
+    upload karne me waqt kahan lag raha hai -- text nikalne me, embeddings
+    banane me, ya index likhne me.
     """
-    text = extract_text(file_path)
-    chunks = chunk_text(text)
-    if not chunks:
-        return 0
+    langfuse = _get_langfuse_client()
+    file_type = (os.path.splitext(filename)[1].lstrip(".").lower() or "unknown")
 
-    model = get_embed_model()
-    embeddings = model.encode(chunks, convert_to_numpy=True, show_progress_bar=False, normalize_embeddings=True)
-    embeddings = embeddings.astype("float32")
+    with _observe(
+        langfuse, "document-ingest", as_type="span",
+        input={"filename": filename, "fileType": file_type},
+    ) as root_span:
+        with _attributes(
+            langfuse,
+            user_id=f"user_{user_id}",
+            session_id=session_id,
+            metadata={"mode": "ingest"},
+        ):
+            _emit_event(langfuse, "ingest-request", metadata={
+                "filename": filename,
+                "fileType": file_type,
+            })
 
-    index_path, meta_path = _paths_for_user(user_id)
+            # ---- 1. Text extraction ----
+            with _observe(langfuse, "extract-text", as_type="span",
+                          input={"filename": filename, "fileType": file_type}) as span:
+                text = extract_text(file_path)
+                _update(span, output={
+                    "characters": len(text),
+                    "isEmpty": not text.strip(),
+                })
 
-    # Start a fresh index for every new upload, discarding any previously
-    # uploaded document's chunks. This ensures questions are answered only
-    # from the most recently uploaded document, not older ones.
-    dim = embeddings.shape[1]
-    index = faiss.IndexFlatL2(dim)
-    metadata = []
+            # ---- 2. Chunking ----
+            with _observe(langfuse, "chunking", as_type="span",
+                          input={"chunkSize": CHUNK_SIZE, "overlap": CHUNK_OVERLAP}) as span:
+                chunks = chunk_text(text)
+                _update(span, output={
+                    "chunkCount": len(chunks),
+                    "avgChunkChars": (
+                        round(sum(len(c) for c in chunks) / len(chunks)) if chunks else 0
+                    ),
+                })
 
-    index.add(embeddings)
-    for chunk in chunks:
-        metadata.append({"text": chunk, "source": filename})
+            if not chunks:
+                # Scanned PDF ya khaali file -- yahin ruk jate hain.
+                _emit_event(langfuse, "ingest-skipped", metadata={
+                    "reason": "no extractable text (scanned PDF or empty file?)",
+                    "filename": filename,
+                })
+                _tag_trace(
+                    langfuse,
+                    tags=[TRACE_APP_TAG, "ingest", "empty-document"],
+                    output={"chunkCount": 0, "indexed": False},
+                )
+                _update(root_span, output={"chunkCount": 0, "indexed": False})
+                _flush(langfuse)
+                return 0
 
-    faiss.write_index(index, index_path)
-    with open(meta_path, "wb") as f:
-        pickle.dump(metadata, f)
+            # ---- 3. Embedding ----
+            with _observe(langfuse, "embedding", as_type="span",
+                          input={"model": EMBED_MODEL_NAME, "chunkCount": len(chunks)}) as span:
+                model = get_embed_model()
+                embeddings = model.encode(
+                    chunks, convert_to_numpy=True,
+                    show_progress_bar=False, normalize_embeddings=True,
+                )
+                embeddings = embeddings.astype("float32")
+                _update(span, output={
+                    "vectors": int(embeddings.shape[0]),
+                    "dimensions": int(embeddings.shape[1]),
+                })
 
+            # ---- 4. Index write ----
+            with _observe(langfuse, "index-write", as_type="span") as span:
+                index_path, meta_path = _paths_for_user(user_id)
+
+                # Start a fresh index for every new upload, discarding any
+                # previously uploaded document's chunks. This ensures questions
+                # are answered only from the most recently uploaded document.
+                index = faiss.IndexFlatL2(embeddings.shape[1])
+                index.add(embeddings)
+                metadata = [{"text": chunk, "source": filename} for chunk in chunks]
+
+                faiss.write_index(index, index_path)
+                with open(meta_path, "wb") as f:
+                    pickle.dump(metadata, f)
+
+                _update(span, output={
+                    "vectorsInIndex": int(index.ntotal),
+                    "replacedPreviousIndex": True,
+                })
+
+            _emit_event(langfuse, "ingest-completed", metadata={
+                "filename": filename,
+                "chunkCount": len(chunks),
+            })
+            _tag_trace(
+                langfuse,
+                tags=[TRACE_APP_TAG, "ingest", file_type],
+                output={"filename": filename, "chunkCount": len(chunks), "indexed": True},
+            )
+
+        _update(root_span, output={
+            "filename": filename,
+            "chunkCount": len(chunks),
+            "indexed": True,
+        })
+
+    _flush(langfuse)
     return len(chunks)
 
 
-def retrieve_relevant_chunks(user_id, query, top_k=4):
+def embed_query(query):
+    """
+    Sawal ko vector me badalta hai.
+
+    Pehle ye kaam retrieve_relevant_chunks() ke andar chhupa hua tha, is
+    liye Langfuse par embedding aur FAISS search dono ka waqt ek hi span me
+    mila jula nazar aata tha. Ab alag function hai taake "embedding" apna
+    span bana sake aur dashboard par pata chale ke asal me dair kis step me
+    ho rahi hai.
+    """
+    model = get_embed_model()
+    return model.encode(
+        [query], convert_to_numpy=True, normalize_embeddings=True
+    ).astype("float32")
+
+
+def retrieve_relevant_chunks(user_id, query, top_k=4, query_vec=None):
     """
     Fetches the top-k chunks most relevant to the query from the user's index.
+
+    `query_vec`: pehle se bana hua query embedding. answer_question() ise
+    pass karti hai taake embedding apne alag Langfuse span me ho. Na diya
+    jaye to yahin bana liya jata hai (purane callers waise hi chalte rehte
+    hain).
 
     Note: we deliberately do NOT hard-filter these by embedding distance.
     Short/meta-phrased questions (e.g. "what is the candidate's name in the
@@ -153,15 +421,24 @@ def retrieve_relevant_chunks(user_id, query, top_k=4):
     with open(meta_path, "rb") as f:
         metadata = pickle.load(f)
 
-    model = get_embed_model()
-    query_vec = model.encode([query], convert_to_numpy=True, normalize_embeddings=True).astype("float32")
+    if query_vec is None:
+        query_vec = embed_query(query)
 
     k = min(top_k, index.ntotal)
     if k == 0:
         return []
     distances, indices = index.search(query_vec, k)
 
-    results = [metadata[idx] for idx in indices[0] if 0 <= idx < len(metadata)]
+    # Har chunk ke sath uski distance aur rank bhi rakh lete hain -- ye
+    # Langfuse ke retrieval span me chala jata hai, jahan se andaza hota
+    # hai ke match kitna mazboot tha.
+    results = []
+    for rank, (idx, distance) in enumerate(zip(indices[0], distances[0]), start=1):
+        if 0 <= idx < len(metadata):
+            chunk = dict(metadata[idx])
+            chunk["distance"] = float(distance)
+            chunk["rank"] = rank
+            results.append(chunk)
 
     if len(distances[0]) > 0:
         print(f"[RAG] query={query!r} best_distance={distances[0][0]:.3f} (informational only, not filtered)")
@@ -329,59 +606,112 @@ def answer_question(user_id, query, session_id=None, top_k=4):
     """
     Full RAG pipeline for one user question: retrieval + generation.
 
-    This is the single entry point /ask should call. When Langfuse is
-    configured it wraps the whole thing in ONE parent trace/span
-    ("rag-chat") with two children nested under it:
-        rag-chat (root span)
-          |- retrieval        (span: which chunks were fetched)
-          |- rag-answer       (generation: the LLM call, from _call_gemini)
-    That's what produces the trace graph (root -> retrieval -> generation)
-    in the Langfuse UI, instead of a single disconnected generation.
-    Without Langfuse configured, this just runs retrieval + generation with
-    no tracing overhead, exactly as before.
+    This is the single entry point /ask should call.
+
+    Langfuse par ye trace banti hai:
+
+        rag-chat                       (root span)
+          |- chat-request              (event)      sawal ki tafseel
+          |- embedding                 (span)       query -> vector
+          |- retrieval                 (retriever)  FAISS search
+          |- mode-selected             (event)      rag ya general-chat
+          |- rag-answer / general-chat (generation) Gemini call + tokens
+          |- chat-completed            (event)      answer ki tafseel
+
+    Pehle sirf retrieval aur generation nazar aate the. Ab embedding ka
+    apna span hai, aur teen events se ye bhi record hota hai ke bot ne
+    kaun sa mode chuna aur kyun -- jo debugging me sab se zyada kaam aata
+    hai jab jawab document ke bajaye general knowledge se aa jaye.
+
+    Langfuse configured na ho to ye sab helpers no-op ban jate hain aur
+    pipeline bilkul waise hi chalti hai, bas tracing ke baghair.
     """
     langfuse = _get_langfuse_client()
 
-    if not langfuse:
-        chunks = retrieve_relevant_chunks(user_id, query, top_k=top_k)
-        answer, source_used = generate_answer(query, chunks)
-        sources = list({c["source"] for c in chunks}) if source_used is not False else []
-        return answer, sources
-
-    with langfuse.start_as_current_observation(
-        name="rag-chat",
-        as_type="span",
-        input={"query": query},
-    ) as root_span:
-        # Trace-level attributes -- these are what let you filter/search by
-        # user or conversation in the Langfuse dashboard (Session/User ID
-        # pills you saw in the QueryMind screenshot). propagate_attributes()
-        # applies them to this span AND every child span opened inside it.
-        with propagate_attributes(
+    with _observe(langfuse, "rag-chat", as_type="span", input={"query": query}) as root_span:
+        # Trace-level attributes -- inhi se Langfuse dashboard par User /
+        # Session wali pills banti hain aur filter lagta hai.
+        # propagate_attributes() inhe is span AND andar khulne wale har
+        # span par laga deta hai.
+        with _attributes(
+            langfuse,
             user_id=f"user_{user_id}",
             session_id=session_id,
             metadata={"mode": "chat"},
         ):
-            with langfuse.start_as_current_observation(
-                name="retrieval",
-                as_type="retriever",
-                input={"query": query, "top_k": top_k},
-            ) as retrieval_span:
-                chunks = retrieve_relevant_chunks(user_id, query, top_k=top_k)
-                retrieved_sources = list({c["source"] for c in chunks})
-                retrieval_span.update(
-                    output={"num_chunks_found": len(chunks), "sources": retrieved_sources},
-                )
+            _emit_event(langfuse, "chat-request", metadata={
+                "queryLength": len(query),
+                "queryWords": len(query.split()),
+                "topK": top_k,
+                "hasDocument": _user_has_index(user_id),
+            })
 
-            # generate_answer() -> _call_gemini() opens its own "generation"
-            # observation internally; because we're still inside this context,
-            # Langfuse automatically nests it under rag-chat.
+            # ---- 1. Query embedding ----
+            with _observe(langfuse, "embedding", as_type="span",
+                          input={"model": EMBED_MODEL_NAME, "query": query}) as span:
+                query_vec = embed_query(query)
+                _update(span, output={"dimensions": int(query_vec.shape[1])})
+
+            # ---- 2. Retrieval ----
+            with _observe(langfuse, "retrieval", as_type="retriever",
+                          input={"query": query, "topK": top_k}) as span:
+                chunks = retrieve_relevant_chunks(user_id, query, top_k=top_k, query_vec=query_vec)
+                retrieved_sources = list({c["source"] for c in chunks})
+                _update(span, output={
+                    "chunkCount": len(chunks),
+                    "sources": retrieved_sources,
+                    "bestDistance": round(chunks[0]["distance"], 4) if chunks else None,
+                })
+
+            # ---- 3. Mode ----
+            mode = "rag" if chunks else "general-chat"
+            _emit_event(langfuse, "mode-selected", metadata={
+                "mode": mode,
+                "reason": (
+                    "document chunks retrieved, answering with context"
+                    if chunks else
+                    "no document indexed for this user, answering from general knowledge"
+                ),
+            })
+
+            # ---- 4. Generation ----
+            # generate_answer() -> _call_gemini() apna "generation"
+            # observation khud kholta hai; hum abhi bhi is context ke andar
+            # hain, is liye Langfuse usay rag-chat ke neeche nest kar deta hai.
             answer, source_used = generate_answer(query, chunks)
             sources = retrieved_sources if source_used is not False else []
 
-        root_span.update(output={"answer": answer, "sources": sources, "source_used": source_used})
+            _emit_event(langfuse, "chat-completed", metadata={
+                "answerLength": len(answer or ""),
+                "sourceCount": len(sources),
+                "sources": sources,
+                "contextUsed": source_used,
+            })
 
-    langfuse.flush()
+            _tag_trace(
+                langfuse,
+                tags=[
+                    TRACE_APP_TAG,
+                    "chat",
+                    mode,
+                    "context-used" if sources else "no-context",
+                ],
+                output={
+                    "answerLength": len(answer or ""),
+                    "sourceCount": len(sources),
+                    "sources": sources,
+                },
+            )
+
+        _update(root_span, output={
+            "answer": answer,
+            "sources": sources,
+            "answerLength": len(answer or ""),
+            "sourceCount": len(sources),
+            "sourceUsed": source_used,
+        })
+
+    _flush(langfuse)
     return answer, sources
 
 
@@ -400,26 +730,234 @@ def _safe_call_gemini(prompt, trace_name, metadata, langfuse_prompt):
                 "temporarily unavailable). Please try again in a moment.")
 
 
-_SOURCE_USED_RE = re.compile(r"\n?\[\[SOURCE_USED:\s*(YES|NO)\s*\]\]\s*$", re.IGNORECASE)
+# ==========================================================================
+# Answer polishing
+# ==========================================================================
+# Prompt model se professional markdown maangta hai, lekin LLM kabhi kabhi
+# rules todta hai: "* item" bullets, adhoora "**Heading" (closing ** ghayab),
+# ya "Certainly!" jaisa filler. Frontend (markdown.js) waise to in sab ko
+# handle kar leta hai, magar us se pehle yahan text saaf karne ke 3 faide
+# hain:
+#   1. Database me bhi saaf jawab save hota hai (history, export, audit).
+#   2. Copy aur text-to-speech ko saaf text milta hai.
+#   3. Kal koi doosra client (mobile app, API) bane to usay bhi saaf mile.
+#
+# Ye sirf formatting theek karta hai -- jawab ka matlab kabhi nahi badalta.
+
+_FILLER_OPENERS = re.compile(
+    r"^\s*(certainly|sure|of course|absolutely|great question|good question|"
+    r"that's a great question|happy to help|no problem)\b[!,.\s]*",
+    re.IGNORECASE,
+)
+
+# "According to the resume, X" -> "X". Model ko style guide me mana kiya
+# gaya hai, lekin ye safety net hai agar wo phir bhi likh de -- khaas taur
+# par chhote factual jawabon me ("naam kya hai") ye phrase sirf shor hoti
+# hai, koi maani nahi rakhti.
+_DOCUMENT_ATTRIBUTION = re.compile(
+    r"^\s*(according to (the |his |her |their )?"
+    r"(resume|document|cv|file|context|text)s?,?\s*)",
+    re.IGNORECASE,
+)
 
 
-def _split_source_marker(answer):
+def _polish_line(line):
+    """Ek line ke markdown markers durust karta hai."""
+    # "* item" / "+ item" ko standard "- item" bullet bana dete hain.
+    line = re.sub(r"^(\s*)[*+]\s+(?=\S)", r"\1- ", line)
+
+    # "***" kabhi bhi valid emphasis nahi -- bold+italic ka mila jula
+    # markup jo aksar toota hua render hota hai. Bold par le aate hain.
+    line = re.sub(r"\*{3,}", "**", line)
+
+    # Adhoore bold markers: agar line par "**" ki ginti taaq (odd) hai to
+    # aakhri wala orphan hai. Usay hata dete hain -- band karne ke bajaye,
+    # kyunke band karne se poori line ghalti se bold ho sakti hai.
+    if line.count("**") % 2 == 1:
+        idx = line.rfind("**")
+        line = line[:idx] + line[idx + 2:]
+
+    # "**Label:**value" -> "**Label:** value" (colon ke baad space)
+    line = re.sub(r"(\*\*[^*\n]+\*\*):(?=\S)", r"\1: ", line)
+    line = re.sub(r"(\*\*[^*\n]+:\*\*)(?=\S)", r"\1 ", line)
+
+    return line.rstrip()
+
+
+def polish_answer(text):
     """
-    The 'rag-answer' prompt ends its reply with a hidden marker line like
-    "[[SOURCE_USED: YES]]" or "[[SOURCE_USED: NO]]" so the code -- not an
-    embedding-distance guess -- knows whether the document context was
-    actually used. Strips the marker from the visible text and returns
-    (clean_answer, used_document | None). None means the model didn't
-    include a parseable marker (older prompt version, or it just forgot).
+    Model ke jawab ki formatting ko normalize karta hai.
+
+    Code blocks (``` ... ```) ko chhu kar bhi nahi dekhte -- unke andar
+    asterisks aur indentation asli code ka hissa ho sakte hain.
+    """
+    if not text or not text.strip():
+        return text
+
+    text = text.replace("\r\n", "\n").replace("\r", "\n")
+    text = _FILLER_OPENERS.sub("", text, count=1)
+
+    # Har paragraph ke shuru se "According to the document/resume, " hata
+    # dete hain -- ye sirf pehli line par nahi, kabhi kabhi model beech me
+    # naye paragraph ke saath bhi ye phrase dohra deta hai.
+    lines_for_attribution = text.split("\n")
+    for idx, line in enumerate(lines_for_attribution):
+        stripped = _DOCUMENT_ATTRIBUTION.sub("", line)
+        if stripped != line and stripped:
+            stripped = stripped[0].upper() + stripped[1:]
+        lines_for_attribution[idx] = stripped
+    text = "\n".join(lines_for_attribution)
+
+    polished = []
+    in_code_block = False
+    for line in text.split("\n"):
+        if line.lstrip().startswith("```"):
+            in_code_block = not in_code_block
+            polished.append(line.rstrip())
+            continue
+        polished.append(line if in_code_block else _polish_line(line))
+
+    text = "\n".join(polished)
+
+    # Heading se pehle khaali line -- warna wo upar wale paragraph se chipak
+    # jati hai aur markdown parser usay heading maan hi nahi pata.
+    text = re.sub(r"(?<!\n)\n(#{1,6}\s)", r"\n\n\1", text)
+
+    # Do se zyada khaali lines kabhi zaroori nahi hotin.
+    text = re.sub(r"\n{3,}", "\n\n", text)
+
+    return text.strip()
+
+
+_TRAILING_MARKER_RE = re.compile(
+    r"\n?\s*\[\[(SOURCE_USED|ANSWER_TYPE):\s*([A-Z]+)\s*\]\]\s*$", re.IGNORECASE
+)
+
+
+def _split_markers(answer):
+    """
+    The 'rag-answer' prompt ends its reply with hidden marker lines like
+    "[[SOURCE_USED: YES]]" and "[[ANSWER_TYPE: FACT]]" so the code -- not a
+    guess -- knows (a) whether the document context was actually used, and
+    (b) whether this answer is a short document fact or a proper
+    explanation. Strips both markers (in either order, one or both present)
+    and returns (clean_answer, source_used, answer_type).
+
+        source_used: True / False / None (None = no parseable marker --
+            older prompt version, or the model just forgot)
+        answer_type: "FACT" / "EXPLANATION" / None (None = same as above)
+
+    Looping (instead of matching both at once) means it doesn't matter
+    which marker the model wrote first.
     """
     if not answer:
-        return answer, None
-    match = _SOURCE_USED_RE.search(answer)
-    if not match:
-        return answer, None
-    clean = answer[:match.start()].rstrip()
-    used = match.group(1).upper() == "YES"
-    return clean, used
+        return answer, None, None
+
+    text = answer
+    source_used = None
+    answer_type = None
+
+    while True:
+        match = _TRAILING_MARKER_RE.search(text)
+        if not match:
+            break
+        key = match.group(1).upper()
+        value = match.group(2).upper()
+        if key == "SOURCE_USED" and value in ("YES", "NO"):
+            source_used = (value == "YES")
+        elif key == "ANSWER_TYPE" and value in ("FACT", "EXPLANATION"):
+            answer_type = value
+        text = text[:match.start()].rstrip()
+
+    return text, source_used, answer_type
+
+
+# ==========================================================================
+# Scope enforcement -- jab prompt kaafi na ho
+# ==========================================================================
+# STYLE_GUIDE model ko "sirf jo poocha gaya wahi do" keh chuka hai, lekin
+# Gemini kabhi kabhi phir bhi extra sentences jorta hai (jaise resume ka
+# poora background). Prompt par bharosa karne ke bajaye yahan ek deterministic
+# check hai: agar sawal chhota aur seedha factual tha (naam, tareekh, number,
+# yes/no), aur jawab me headings/bullets/table nahi hain (matlab model ne
+# genuinely ek fact ka jawab paragraph bana diya), to sirf pehla jumla
+# rakhte hain, baaki hata dete hain.
+#
+# Ye sirf plain-paragraph jawabon par lagta hai -- agar jawab me "## heading"
+# ya "- bullet" ya table hai, to samajh lete hain ke sawal ne genuinely
+# structure maanga tha aur kuch nahi chhedte.
+
+# In lafzon me se koi bhi ho to samajh lo user ne khud tafseel maangi hai --
+# aise sawal ka lamba jawab "over-answering" nahi, sahi jawab hai.
+_DETAIL_REQUESTED_RE = re.compile(
+    r"\b(explain|describe|elaborate|summar(y|ize|ise)|overview|breakdown|"
+    r"detail|details|list|compare|discuss|walk me through|tell me (more )?about|"
+    r"why|how does|how do|how did|how can|pros and cons|advantages|"
+    r"background|full|everything|all about)\b",
+    re.IGNORECASE,
+)
+
+# Ek chhota factual sawal aam taur par in shuru honay wale lafzon se pehchana
+# jata hai (naam/tareekh/number/yes-ya-no poochne wale sawal).
+_SHORT_FACT_QUESTION_RE = re.compile(
+    r"^\s*(what|who|when|where|which|how (many|much|old)|is|are|does|do|"
+    r"can|will|did)\b",
+    re.IGNORECASE,
+)
+
+_STRUCTURED_ANSWER_RE = re.compile(r"^\s{0,3}(#{1,6}\s|[-*+]\s|\d+[.)]\s|\|)", re.MULTILINE)
+
+
+def _split_sentences(paragraph):
+    """
+    Ek paragraph ko jumlon me torta hai. Simple hai (regex-based, koi NLP
+    library nahi), lekin is kaam ke liye kaafi hai -- hume sirf "pehla jumla
+    kahan khatam hota hai" pata karna hai.
+    """
+    return [s.strip() for s in re.split(r"(?<=[.!?])\s+(?=[A-Z0-9])", paragraph.strip()) if s.strip()]
+
+
+def enforce_scope(query, answer):
+    """
+    Chhote factual sawalon (naam, tareekh, number, yes/no) ke jawab ko sirf
+    pehle jumle tak mehdood karta hai, agar model ne extra paragraph jor
+    diya ho.
+
+    Deterministic hai -- model ke "kam likho" maan lene par bharosa nahi
+    karta, khud check kar ke faisla karta hai. Isi liye ye function ka naam
+    "enforce" hai, "ask" nahi.
+    """
+    if not answer or not answer.strip():
+        return answer
+
+    # Sawal khud tafseel maang raha tha -- kuch mat chhero.
+    if _DETAIL_REQUESTED_RE.search(query):
+        return answer
+
+    words = query.strip().split()
+    looks_like_short_fact = (
+        len(words) <= 10 and bool(_SHORT_FACT_QUESTION_RE.match(query.strip()))
+    )
+    if not looks_like_short_fact:
+        return answer
+
+    # Jawab pehle se hi structured hai (heading/bullet/table) -- matlab is
+    # sawal ka jawab genuinely woh structure maangta tha, chhero mat.
+    if _STRUCTURED_ANSWER_RE.search(answer):
+        return answer
+
+    paragraphs = [p for p in answer.split("\n\n") if p.strip()]
+    if not paragraphs:
+        return answer
+
+    first_para_sentences = _split_sentences(paragraphs[0])
+    extra_paragraphs = len(paragraphs) > 1
+    extra_sentences = len(first_para_sentences) > 1
+
+    if not extra_paragraphs and not extra_sentences:
+        return answer  # Jawab pehle se hi ek jumle ka hai, kuch karne ki zaroorat nahi
+
+    return first_para_sentences[0] if first_para_sentences else answer
 
 
 def generate_answer(query, context_chunks):
@@ -451,13 +989,16 @@ def generate_answer(query, context_chunks):
     """
     if not context_chunks:
         # Nothing to ground the answer in -- behave as a general chatbot.
+        # No document was even involved here, so this is never a candidate
+        # for scope-trimming: general questions ("what is machine
+        # learning?") always get a proper explanatory answer.
         prompt, langfuse_prompt = get_prompt("general-chat", question=query)
         metadata = {"mode": "general-chat", "selected_sources": [], "context_chunks": 0}
         answer = _safe_call_gemini(prompt, "general-chat", metadata, langfuse_prompt)
         if answer is None:
             return ("(GEMINI_API_KEY is not set, so I can't answer general questions right now. "
                     "You can still upload a document to test retrieval.)"), None
-        return answer, None
+        return polish_answer(answer), None
 
     context = "\n\n".join(f"[Source: {c['source']}]\n{c['text']}" for c in context_chunks)
     prompt, langfuse_prompt = get_prompt("rag-answer", context=context, question=query)
@@ -474,7 +1015,26 @@ def generate_answer(query, context_chunks):
         return ("(GEMINI_API_KEY is not set, so showing the retrieved context directly)\n\n"
                 + context), None
 
-    answer, source_used = _split_source_marker(answer)
+    # Dono hidden markers alag karte hain, phir formatting saaf karte hain.
+    answer, source_used, answer_type = _split_markers(answer)
+    answer = polish_answer(answer)
+
+    # Scope-trimming SIRF tab lagti hai jab model ne khud kaha ho ke ye
+    # jawab document se aaya ek "FACT" hai (naam, tareekh, number). Agar
+    # model ne "EXPLANATION" kaha -- matlab term document me sirf naam se
+    # tha aur jawab general knowledge se banaya gaya -- to poori tafseel
+    # rehti hai, kaati nahi jati.
+    #
+    # Agar marker parse hi nahi hua (purana/cached prompt jisme marker
+    # instruction nahi thi), to purane word-based heuristic par wapas chale
+    # jate hain -- yehi safety net hai taake behavior kabhi achanak na
+    # bigde agar Langfuse par koi purana prompt version chal raha ho.
+    if answer_type == "FACT":
+        answer = enforce_scope(query, answer)
+    elif answer_type is None:
+        answer = enforce_scope(query, answer)
+    # answer_type == "EXPLANATION" -> kuch nahi chhedte, poori tafseel rehti hai.
+
     return answer, source_used
 
 
@@ -482,9 +1042,17 @@ def summarize_document(user_id, filename=None, session_id=None):
     """
     Generates a summary of the user's uploaded document(s).
     If filename is given, only that file's chunks are summarized; otherwise all of them.
-    Wrapped in a Langfuse trace the same way as answer_question(), so it shows
-    up as its own "rag-summary" trace with a nested "load-document" span and
-    the generation, rather than a disconnected generation.
+
+    Langfuse par apni alag "rag-summary" trace banti hai, ab events ke sath:
+
+        rag-summary                (root span)
+          |- summary-request       (event)
+          |- load-document         (span)       kitne chunks mile
+          |- rag-summary-generation(generation) Gemini call
+          |- summary-completed     (event)      summary ki length
+
+    answer_question() jaisa hi dhancha, taake dashboard par dono ek jaise
+    lagen aur tags se filter ho saken.
     """
     langfuse = _get_langfuse_client()
 
@@ -498,35 +1066,59 @@ def summarize_document(user_id, filename=None, session_id=None):
             return [m["text"] for m in metadata if m["source"] == filename]
         return [m["text"] for m in metadata]
 
-    if not langfuse:
-        chunks = _load_chunks()
-        if chunks is None:
-            return "No document has been uploaded yet. Please upload a document first."
-        return _summarize_chunks(chunks, filename)
+    target = filename or "all documents"
 
-    with langfuse.start_as_current_observation(
-        name="rag-summary",
-        as_type="span",
-        input={"filename": filename or "all documents"},
-    ) as root_span:
-        with propagate_attributes(
+    with _observe(langfuse, "rag-summary", as_type="span",
+                  input={"filename": target}) as root_span:
+        with _attributes(
+            langfuse,
             user_id=f"user_{user_id}",
             session_id=session_id,
             metadata={"mode": "summary"},
         ):
-            with langfuse.start_as_current_observation(name="load-document", as_type="span") as load_span:
+            _emit_event(langfuse, "summary-request", metadata={"filename": target})
+
+            with _observe(langfuse, "load-document", as_type="span") as span:
                 chunks = _load_chunks()
-                load_span.update(output={"num_chunks": len(chunks) if chunks is not None else 0})
+                _update(span, output={
+                    "chunkCount": len(chunks) if chunks is not None else 0,
+                    "documentFound": chunks is not None,
+                })
 
             if chunks is None:
-                root_span.update(output={"error": "no document uploaded"})
+                _emit_event(langfuse, "summary-skipped", metadata={
+                    "reason": "no document uploaded yet",
+                })
+                _tag_trace(
+                    langfuse,
+                    tags=[TRACE_APP_TAG, "summary", "no-document"],
+                    output={"error": "no document uploaded"},
+                )
+                _update(root_span, output={"error": "no document uploaded"})
+                _flush(langfuse)
                 return "No document has been uploaded yet. Please upload a document first."
 
             summary = _summarize_chunks(chunks, filename)
 
-        root_span.update(output={"summary": summary})
+            _emit_event(langfuse, "summary-completed", metadata={
+                "summaryLength": len(summary or ""),
+                "chunkCount": len(chunks),
+            })
+            _tag_trace(
+                langfuse,
+                tags=[TRACE_APP_TAG, "summary", "document"],
+                output={
+                    "summaryLength": len(summary or ""),
+                    "chunkCount": len(chunks),
+                },
+            )
 
-    langfuse.flush()
+        _update(root_span, output={
+            "summary": summary,
+            "summaryLength": len(summary or ""),
+        })
+
+    _flush(langfuse)
     return summary
 
 
@@ -549,4 +1141,4 @@ def _summarize_chunks(chunks, filename=None):
     if summary is None:
         return ("(GEMINI_API_KEY is not set, so a summary could not be generated. "
                 "Showing a portion of the document below instead)\n\n" + full_text[:1000])
-    return summary
+    return polish_answer(summary)

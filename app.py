@@ -401,7 +401,12 @@ def upload():
     save_path = os.path.join(app.config["UPLOAD_FOLDER"], f"{current_user.id}_{file.filename}")
     file.save(save_path)
 
-    num_chunks = build_or_update_index(current_user.id, save_path, file.filename)
+    # session_id optional hai. Frontend bhejta hai taake Langfuse par
+    # document ka "document-ingest" trace usi conversation ke neeche group
+    # ho jaye jisme wo document upload kiya gaya tha -- yani ek hi session
+    # me upload aur uske baad wale sawal sath nazar aate hain.
+    session_id = request.form.get("session_id") or None
+    num_chunks = build_or_update_index(current_user.id, save_path, file.filename, session_id=session_id)
 
     return jsonify({
         "message": f"'{file.filename}' uploaded and {num_chunks} chunks added to the index.",

@@ -833,6 +833,212 @@ input:focus-visible {
     background: linear-gradient(145deg, var(--brand-a), var(--brand-b));
 }
 
+/* =========================================================================
+   Formatted answers (markdown.js ka output)
+   -------------------------------------------------------------------------
+   .msg par `white-space: pre-wrap` laga hua hai. Wo plain text ke liye sahi
+   tha, lekin rendered HTML ke andar har newline extra khaali line bana deta
+   hai. Is liye content wrapper ke andar normal wrapping wapas laate hain
+   aur spacing margins se control karte hain.
+   ========================================================================= */
+.msg-content {
+    white-space: normal;
+    display: flow-root;
+    /* flow-root: pehle/aakhri child ka margin bubble se bahar nahi girta */
+}
+
+.msg-content> :first-child {
+    margin-top: 0;
+}
+
+.msg-content> :last-child {
+    margin-bottom: 0;
+}
+
+.msg-content p {
+    margin: 0 0 12px;
+}
+
+/* Yehi wo hissa hai jo pehle "**text**" bana kar dikhta tha.
+   Weight 650 body text (400) se saaf alag nazar aata hai bina chilaye. */
+.msg-content strong {
+    font-weight: 650;
+    color: var(--text);
+}
+
+.msg-content em {
+    font-style: italic;
+    color: var(--text);
+}
+
+.msg-content del {
+    color: var(--text-mute);
+}
+
+.msg-content a {
+    color: var(--brand-a);
+    text-decoration: underline;
+    text-underline-offset: 2px;
+}
+
+.msg-content a:hover {
+    text-decoration-thickness: 2px;
+}
+
+/* ---------- Section headings ---------- */
+.msg-content h3,
+.msg-content h4,
+.msg-content h5,
+.msg-content h6 {
+    margin: 20px 0 9px;
+    font-weight: 650;
+    line-height: 1.35;
+    color: var(--text);
+}
+
+.msg-content h3 {
+    font-size: 16.5px;
+    padding-bottom: 6px;
+    border-bottom: 1px solid var(--line);
+}
+
+.msg-content h4 {
+    font-size: 15px;
+}
+
+.msg-content h5,
+.msg-content h6 {
+    font-size: 14px;
+    color: var(--text-soft);
+}
+
+/* ---------- Lists ---------- */
+.msg-content ul.md-list,
+.msg-content ol.md-list {
+    margin: 0 0 12px;
+    padding-left: 22px;
+}
+
+.msg-content li {
+    margin-bottom: 6px;
+    padding-left: 3px;
+}
+
+.msg-content li:last-child {
+    margin-bottom: 0;
+}
+
+.msg-content li>ul.md-list,
+.msg-content li>ol.md-list {
+    margin-top: 6px;
+    margin-bottom: 0;
+}
+
+.msg-content ul.md-list {
+    list-style: none;
+    padding-left: 4px;
+}
+
+.msg-content ul.md-list>li {
+    position: relative;
+    padding-left: 18px;
+}
+
+.msg-content ul.md-list>li::before {
+    content: "";
+    position: absolute;
+    left: 3px;
+    top: 0.62em;
+    width: 5px;
+    height: 5px;
+    border-radius: 50%;
+    background: var(--text-faint);
+}
+
+.msg-content ul.md-list ul.md-list>li::before {
+    border-radius: 0;
+    width: 5px;
+    height: 1.5px;
+}
+
+.msg-content ol.md-list>li::marker {
+    color: var(--text-mute);
+    font-variant-numeric: tabular-nums;
+}
+
+/* ---------- Code ---------- */
+.msg-content code {
+    font-family: ui-monospace, "SF Mono", "Cascadia Mono", Menlo, Consolas, monospace;
+    font-size: 0.88em;
+    padding: 2px 5px;
+    border-radius: 5px;
+    background: var(--raised);
+    border: 1px solid var(--line);
+}
+
+.msg-content pre.md-code {
+    margin: 0 0 12px;
+    padding: 13px 15px;
+    border-radius: 10px;
+    background: var(--raised);
+    border: 1px solid var(--line);
+    overflow-x: auto;
+}
+
+.msg-content pre.md-code code {
+    padding: 0;
+    border: 0;
+    background: none;
+    font-size: 13px;
+    line-height: 1.6;
+    white-space: pre;
+}
+
+/* ---------- Tables ---------- */
+.msg-content .md-table-wrap {
+    margin: 0 0 13px;
+    overflow-x: auto;
+    border: 1px solid var(--line);
+    border-radius: 10px;
+}
+
+.msg-content table.md-table {
+    width: 100%;
+    border-collapse: collapse;
+    font-size: 14px;
+}
+
+.msg-content table.md-table th,
+.msg-content table.md-table td {
+    padding: 9px 13px;
+    border-bottom: 1px solid var(--line);
+    vertical-align: top;
+}
+
+.msg-content table.md-table th {
+    background: var(--raised);
+    font-weight: 650;
+    white-space: nowrap;
+}
+
+.msg-content table.md-table tr:last-child td {
+    border-bottom: 0;
+}
+
+/* ---------- Quote & rule ---------- */
+.msg-content blockquote {
+    margin: 0 0 12px;
+    padding: 2px 0 2px 14px;
+    border-left: 3px solid var(--line-strong);
+    color: var(--text-soft);
+}
+
+.msg-content hr {
+    margin: 17px 0;
+    border: 0;
+    border-top: 1px solid var(--line);
+}
+
 .msg .sources {
     margin-top: 10px;
     padding-top: 9px;
