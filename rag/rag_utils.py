@@ -338,15 +338,30 @@ def answer_question(user_id, query, session_id=None, top_k=4):
 
 def generate_answer(query, context_chunks):
     """
-    Builds context from retrieved chunks and asks the LLM to generate an answer.
-    If GEMINI_API_KEY is not set, returns the retrieved text directly
-    (so RAG retrieval can still be tested without an API key).
+    Builds an answer to the user's question.
+
+    RAG is a *feature*, not a requirement: if a document has been uploaded
+    and relevant chunks were retrieved, they're passed in as extra context
+    that the answer is grounded in. If no chunks are available (nothing
+    uploaded yet, or nothing relevant was found), this still answers the
+    question directly as a general-purpose assistant -- exactly like a
+    normal chatbot -- instead of refusing.
+
+    If GEMINI_API_KEY is not set, falls back to showing the retrieved
+    context directly (RAG mode) or a short notice (general mode), so the
+    app doesn't crash without a key.
     """
-    context = "\n\n".join(f"[Source: {c['source']}]\n{c['text']}" for c in context_chunks)
-
     if not context_chunks:
-        return "I couldn't find any content related to this question in your documents. Please upload a document first."
+        # Nothing to ground the answer in -- behave as a general chatbot.
+        prompt, langfuse_prompt = get_prompt("general-chat", question=query)
+        metadata = {"mode": "general-chat", "selected_sources": [], "context_chunks": 0}
+        answer = _call_gemini(prompt, trace_name="general-chat", metadata=metadata, langfuse_prompt=langfuse_prompt)
+        if answer is None:
+            return ("(GEMINI_API_KEY is not set, so I can't answer general questions right now. "
+                    "You can still upload a document to test retrieval.)")
+        return answer
 
+    context = "\n\n".join(f"[Source: {c['source']}]\n{c['text']}" for c in context_chunks)
     prompt, langfuse_prompt = get_prompt("rag-answer", context=context, question=query)
 
     sources = list({c["source"] for c in context_chunks})

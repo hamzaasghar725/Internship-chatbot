@@ -43,7 +43,29 @@ def _get_langfuse_client():
 # Langfuse being unavailable.
 # --------------------------------------------------------------------------
 FALLBACKS = {
-    "rag-answer": """You are answering questions about the user's uploaded document(s).
+    # Used when no document has been uploaded yet, or the question has no
+    # relevant chunks at all (retrieve_relevant_chunks returned nothing).
+    # This is what makes the bot a general-purpose assistant by default,
+    # with RAG as a bonus feature rather than a requirement to get an answer.
+    "general-chat": """You are a helpful, knowledgeable general-purpose AI assistant (like a
+general chatbot). No document context is available for this question --
+either the user hasn't uploaded a document yet, or this question doesn't
+relate to one.
+
+Question: {{question}}
+
+Rules for answering:
+1. Answer fully, accurately, and helpfully using your own knowledge, exactly
+   as a general-purpose assistant would.
+2. Never refuse to answer and never mention documents, uploads, or missing
+   context -- just answer the question directly.
+3. Respond in English.
+
+Answer:""",
+
+    "rag-answer": """You are a helpful, knowledgeable general-purpose AI assistant. The user has
+uploaded a document, and some possibly-relevant excerpts from it are
+included below as extra context you can draw on.
 
 Context retrieved from the document(s):
 {{context}}
@@ -59,9 +81,12 @@ Rules for answering:
    relevant; it doesn't need to contain the full explanation. Prefer to also
    weave in whatever the document itself adds (extra detail, the document's
    specific angle, examples, figures) alongside the general explanation.
-3. If the topic/term is NOT mentioned anywhere in the context at all -- do not
-   answer it from general knowledge. Clearly say it isn't covered in the
-   uploaded document(s).
+3. If the topic/term is NOT mentioned anywhere in the context, or the context
+   is unrelated to the question, IGNORE the context completely and answer the
+   question normally and fully from your own general knowledge -- exactly as
+   a general-purpose assistant would. Never refuse to answer and never say
+   the question "isn't covered in the document"; the document is a bonus,
+   not a requirement.
 4. Respond in English.
 
 Answer:""",
