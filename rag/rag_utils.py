@@ -1,5 +1,6 @@
 import os
 import pickle
+import re
 import time
 import numpy as np
 import faiss
@@ -107,7 +108,7 @@ def build_or_update_index(user_id, file_path, filename):
         return 0
 
     model = get_embed_model()
-    embeddings = model.encode(chunks, convert_to_numpy=True, show_progress_bar=False)
+    embeddings = model.encode(chunks, convert_to_numpy=True, show_progress_bar=False, normalize_embeddings=True)
     embeddings = embeddings.astype("float32")
 
     index_path, meta_path = _paths_for_user(user_id)
@@ -131,7 +132,19 @@ def build_or_update_index(user_id, file_path, filename):
 
 
 def retrieve_relevant_chunks(user_id, query, top_k=4):
-    """Fetches the top-k chunks most relevant to the query from the user's index."""
+    """
+    Fetches the top-k chunks most relevant to the query from the user's index.
+
+    Note: we deliberately do NOT hard-filter these by embedding distance.
+    Short/meta-phrased questions (e.g. "what is the candidate's name in the
+    document") often score a weak embedding-similarity distance against the
+    actual resume text even though they ARE about the document -- and that
+    score range overlaps with genuinely unrelated questions. A fixed
+    threshold can't reliably tell the two apart. Instead, all top-k chunks
+    are always handed to the LLM, and the "rag-answer" prompt itself judges
+    whether the content is actually relevant (see generate_answer() and the
+    SOURCE_USED marker it parses from the model's answer).
+    """
     index_path, meta_path = _paths_for_user(user_id)
     if not os.path.exists(index_path):
         return []
@@ -141,23 +154,33 @@ def retrieve_relevant_chunks(user_id, query, top_k=4):
         metadata = pickle.load(f)
 
     model = get_embed_model()
-    query_vec = model.encode([query], convert_to_numpy=True).astype("float32")
+    query_vec = model.encode([query], convert_to_numpy=True, normalize_embeddings=True).astype("float32")
 
     k = min(top_k, index.ntotal)
     if k == 0:
         return []
     distances, indices = index.search(query_vec, k)
 
-    results = []
-    for idx in indices[0]:
-        if 0 <= idx < len(metadata):
-            results.append(metadata[idx])
+    results = [metadata[idx] for idx in indices[0] if 0 <= idx < len(metadata)]
+
+    if len(distances[0]) > 0:
+        print(f"[RAG] query={query!r} best_distance={distances[0][0]:.3f} (informational only, not filtered)")
+
     return results
 
 
 GEMINI_TEMPERATURE = 0.3
 GEMINI_MAX_OUTPUT_TOKENS = 1024  # generous ceiling so real answers don't get cut off,
                                  # but still a real, reportable model parameter
+
+
+class GeminiResponseError(Exception):
+    """Raised when Gemini returns a 200 OK but the response has no usable
+    answer text (e.g. blocked by a safety filter, or hit MAX_TOKENS before
+    producing any content). Caught in _call_gemini() so it's treated the same
+    as a failed model candidate -- the next candidate model is tried instead
+    of crashing the request with a raw KeyError."""
+    pass
 
 
 def _post_to_gemini(model_name, api_key, prompt, max_retries=2):
@@ -186,7 +209,26 @@ def _post_to_gemini(model_name, api_key, prompt, max_retries=2):
             )
             response.raise_for_status()
             data = response.json()
-            answer_text = data["candidates"][0]["content"]["parts"][0]["text"]
+
+            candidates = data.get("candidates") or []
+            if not candidates:
+                block_reason = data.get("promptFeedback", {}).get("blockReason")
+                raise GeminiResponseError(
+                    f"no candidates in response (blockReason={block_reason}, raw={str(data)[:300]})"
+                )
+
+            candidate = candidates[0]
+            parts = candidate.get("content", {}).get("parts")
+            if not parts:
+                finish_reason = candidate.get("finishReason")
+                raise GeminiResponseError(
+                    f"no content parts in response (finishReason={finish_reason}, raw={str(candidate)[:300]})"
+                )
+
+            answer_text = parts[0].get("text", "")
+            if not answer_text:
+                raise GeminiResponseError(f"empty text in response part (raw={str(parts[0])[:300]})")
+
             usage = data.get("usageMetadata", {})
             token_usage = {
                 "input_tokens": usage.get("promptTokenCount", 0),
@@ -206,6 +248,8 @@ def _post_to_gemini(model_name, api_key, prompt, max_retries=2):
             last_error = e
             time.sleep(2 * (attempt + 1))
             continue
+        except GeminiResponseError:
+            raise  # malformed/blocked response -- retrying the same model won't help
     raise last_error
 
 
@@ -272,6 +316,10 @@ def _call_gemini(prompt, trace_name="gemini-call", metadata=None, langfuse_promp
             last_error = e
             print(f"[Gemini] Model '{model_name}' timeout/connection error: {e}")
             continue  # network slow/unstable -> try next model
+        except GeminiResponseError as e:
+            last_error = e
+            print(f"[Gemini] Model '{model_name}' returned an unusable response: {e}")
+            continue  # blocked/empty response -> try next model
 
     # None of the candidate models worked
     raise last_error
@@ -296,8 +344,8 @@ def answer_question(user_id, query, session_id=None, top_k=4):
 
     if not langfuse:
         chunks = retrieve_relevant_chunks(user_id, query, top_k=top_k)
-        answer = generate_answer(query, chunks)
-        sources = list({c["source"] for c in chunks})
+        answer, source_used = generate_answer(query, chunks)
+        sources = list({c["source"] for c in chunks}) if source_used is not False else []
         return answer, sources
 
     with langfuse.start_as_current_observation(
@@ -320,32 +368,82 @@ def answer_question(user_id, query, session_id=None, top_k=4):
                 input={"query": query, "top_k": top_k},
             ) as retrieval_span:
                 chunks = retrieve_relevant_chunks(user_id, query, top_k=top_k)
-                sources = list({c["source"] for c in chunks})
+                retrieved_sources = list({c["source"] for c in chunks})
                 retrieval_span.update(
-                    output={"num_chunks_found": len(chunks), "sources": sources},
+                    output={"num_chunks_found": len(chunks), "sources": retrieved_sources},
                 )
 
             # generate_answer() -> _call_gemini() opens its own "generation"
             # observation internally; because we're still inside this context,
             # Langfuse automatically nests it under rag-chat.
-            answer = generate_answer(query, chunks)
+            answer, source_used = generate_answer(query, chunks)
+            sources = retrieved_sources if source_used is not False else []
 
-        root_span.update(output={"answer": answer, "sources": sources})
+        root_span.update(output={"answer": answer, "sources": sources, "source_used": source_used})
 
     langfuse.flush()
     return answer, sources
+
+
+def _safe_call_gemini(prompt, trace_name, metadata, langfuse_prompt):
+    """
+    Wraps _call_gemini() so a total failure (all candidate models timed out,
+    or all returned unusable/blocked responses) becomes a friendly message
+    instead of an unhandled exception crashing the Flask request with a 500.
+    Returns None only when GEMINI_API_KEY isn't set at all (same as before).
+    """
+    try:
+        return _call_gemini(prompt, trace_name=trace_name, metadata=metadata, langfuse_prompt=langfuse_prompt)
+    except Exception as e:
+        print(f"[Gemini] All candidate models failed for '{trace_name}': {e}")
+        return ("Sorry, I couldn't reach the AI model right now (it may be slow or "
+                "temporarily unavailable). Please try again in a moment.")
+
+
+_SOURCE_USED_RE = re.compile(r"\n?\[\[SOURCE_USED:\s*(YES|NO)\s*\]\]\s*$", re.IGNORECASE)
+
+
+def _split_source_marker(answer):
+    """
+    The 'rag-answer' prompt ends its reply with a hidden marker line like
+    "[[SOURCE_USED: YES]]" or "[[SOURCE_USED: NO]]" so the code -- not an
+    embedding-distance guess -- knows whether the document context was
+    actually used. Strips the marker from the visible text and returns
+    (clean_answer, used_document | None). None means the model didn't
+    include a parseable marker (older prompt version, or it just forgot).
+    """
+    if not answer:
+        return answer, None
+    match = _SOURCE_USED_RE.search(answer)
+    if not match:
+        return answer, None
+    clean = answer[:match.start()].rstrip()
+    used = match.group(1).upper() == "YES"
+    return clean, used
 
 
 def generate_answer(query, context_chunks):
     """
     Builds an answer to the user's question.
 
-    RAG is a *feature*, not a requirement: if a document has been uploaded
-    and relevant chunks were retrieved, they're passed in as extra context
-    that the answer is grounded in. If no chunks are available (nothing
-    uploaded yet, or nothing relevant was found), this still answers the
-    question directly as a general-purpose assistant -- exactly like a
-    normal chatbot -- instead of refusing.
+    RAG is a *feature*, not a requirement: if a document has been uploaded,
+    the top-k retrieved chunks are passed in as extra context that the
+    answer CAN be grounded in. If no chunks are available (nothing uploaded
+    yet), this answers directly as a general-purpose assistant -- exactly
+    like a normal chatbot -- instead of refusing.
+
+    Whether the document was actually relevant is judged by the LLM itself
+    (via the "rag-answer" prompt's SOURCE_USED marker), not by embedding
+    distance -- short/meta-phrased questions about a document often score a
+    weak embedding match against the actual document text even when they
+    ARE about it, so a hard distance cutoff can't reliably separate that
+    from a genuinely unrelated question.
+
+    Returns (answer_text, source_used):
+        source_used is True/False when context_chunks was non-empty and the
+        model's marker could be parsed; None when there was no document
+        context to begin with (general-chat) or the marker couldn't be
+        parsed (caller should keep prior behaviour in that case).
 
     If GEMINI_API_KEY is not set, falls back to showing the retrieved
     context directly (RAG mode) or a short notice (general mode), so the
@@ -355,11 +453,11 @@ def generate_answer(query, context_chunks):
         # Nothing to ground the answer in -- behave as a general chatbot.
         prompt, langfuse_prompt = get_prompt("general-chat", question=query)
         metadata = {"mode": "general-chat", "selected_sources": [], "context_chunks": 0}
-        answer = _call_gemini(prompt, trace_name="general-chat", metadata=metadata, langfuse_prompt=langfuse_prompt)
+        answer = _safe_call_gemini(prompt, "general-chat", metadata, langfuse_prompt)
         if answer is None:
             return ("(GEMINI_API_KEY is not set, so I can't answer general questions right now. "
-                    "You can still upload a document to test retrieval.)")
-        return answer
+                    "You can still upload a document to test retrieval.)"), None
+        return answer, None
 
     context = "\n\n".join(f"[Source: {c['source']}]\n{c['text']}" for c in context_chunks)
     prompt, langfuse_prompt = get_prompt("rag-answer", context=context, question=query)
@@ -370,12 +468,14 @@ def generate_answer(query, context_chunks):
         "selected_sources": sources,
         "context_chunks": len(context_chunks),
     }
-    answer = _call_gemini(prompt, trace_name="rag-answer", metadata=metadata, langfuse_prompt=langfuse_prompt)
+    answer = _safe_call_gemini(prompt, "rag-answer", metadata, langfuse_prompt)
     if answer is None:
         # Fallback: no LLM available, just show the retrieved context directly
         return ("(GEMINI_API_KEY is not set, so showing the retrieved context directly)\n\n"
-                + context)
-    return answer
+                + context), None
+
+    answer, source_used = _split_source_marker(answer)
+    return answer, source_used
 
 
 def summarize_document(user_id, filename=None, session_id=None):
@@ -445,7 +545,7 @@ def _summarize_chunks(chunks, filename=None):
         "selected_sources": [filename] if filename else "all uploaded documents",
         "context_chunks": len(chunks),
     }
-    summary = _call_gemini(prompt, trace_name="rag-summary-generation", metadata=metadata, langfuse_prompt=langfuse_prompt)
+    summary = _safe_call_gemini(prompt, "rag-summary-generation", metadata, langfuse_prompt)
     if summary is None:
         return ("(GEMINI_API_KEY is not set, so a summary could not be generated. "
                 "Showing a portion of the document below instead)\n\n" + full_text[:1000])
