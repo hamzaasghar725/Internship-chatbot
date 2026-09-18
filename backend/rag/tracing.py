@@ -156,18 +156,25 @@ def _tag_trace(langfuse, tags=None, output=None):
     Tags hi wo cheez hain jin se dashboard par filter lagta hai -- misaal ke
     taur par sirf wo sawal dekhna jinme document use hi nahi hua
     ("no-context"), ya sirf ingestion traces.
+
+    Langfuse SDK v4 me `update_current_trace()` hata diya gaya hai (yehi
+    wajah thi console warning ki: "'Langfuse' object has no attribute
+    'update_current_trace'"). Naye "observations-first" model me tags ab
+    trace par nahi, balke observations par lagte hain aur upar trace tak
+    khud-ba-khud aggregate ho jate hain -- is liye `propagate_attributes()`
+    use karte hain jo current (abhi active) observation par tags laga deta
+    hai. Output ke liye `set_current_trace_io()` hai, jo purane
+    `update_current_trace(output=...)` ki tarah kaam karta hai (deprecated
+    hai lekin abhi bhi supported hai).
     """
     if langfuse is None:
         return
-    kwargs = {}
-    if tags:
-        kwargs["tags"] = [t for t in tags if t]
-    if output is not None:
-        kwargs["output"] = output
-    if not kwargs:
-        return
     try:
-        langfuse.update_current_trace(**kwargs)
+        if tags:
+            with propagate_attributes(tags=[t for t in tags if t]):
+                pass
+        if output is not None:
+            langfuse.set_current_trace_io(output=output)
     except Exception as e:
         _trace_warn("update_current_trace", e)
 
