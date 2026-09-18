@@ -28,7 +28,17 @@ BASE_DIR = os.path.dirname(os.path.abspath(__file__))
 UPLOAD_FOLDER = os.path.join(BASE_DIR, "uploads")
 ALLOWED_EXTENSIONS = {"pdf", "txt", "docx", "csv"}
 
-app = Flask(__name__)
+# Project layout: backend/ (this file) and frontend/ (templates + static) are
+# now separate sibling folders, so Flask is pointed explicitly at frontend/
+# for its templates and static files. This is a path change only -- URLs
+# (url_for('static', ...)), template names, and all rendering behavior stay
+# exactly the same as before.
+FRONTEND_DIR = os.path.join(BASE_DIR, "..", "frontend")
+app = Flask(
+    __name__,
+    template_folder=os.path.join(FRONTEND_DIR, "templates"),
+    static_folder=os.path.join(FRONTEND_DIR, "static"),
+)
 app.config["SECRET_KEY"] = os.environ.get("SECRET_KEY", "dev-secret-key")
 app.config["SQLALCHEMY_DATABASE_URI"] = "sqlite:///" + os.path.join(BASE_DIR, "users.db")
 app.config["UPLOAD_FOLDER"] = UPLOAD_FOLDER

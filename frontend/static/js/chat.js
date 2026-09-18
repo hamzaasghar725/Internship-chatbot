@@ -139,7 +139,11 @@ function speakText(text, btn = null) {
         btn.title = "Stop reading";
         currentSpeakBtn = btn;
     }
-    window.speechSynthesis.speak(utterance);
+
+    // Chrome has a known bug where calling speak() in the same tick right
+    // after cancel() silently does nothing -- the engine needs a moment to
+    // actually finish cancelling first. A tiny delay avoids that race.
+    setTimeout(() => window.speechSynthesis.speak(utterance), 50);
 }
 
 // ---- Speech-to-Text (mic button fills the question box) ----
@@ -164,8 +168,21 @@ if (SpeechRecognitionAPI && micBtn) {
         sendQuery(); // auto-send the recognized question, same as pressing Send
     };
 
-    recognition.onerror = () => {
-        // Mic access denied, no speech detected, etc. -- just reset the button.
+    recognition.onerror = (event) => {
+        // Log the real reason instead of silently doing nothing, so mic
+        // issues (blocked permission, insecure origin, no mic found, etc.)
+        // are actually visible instead of just "nothing happens".
+        console.error("Speech recognition error:", event.error);
+        isListening = false;
+        micBtn.classList.remove("listening");
+
+        if (event.error === "not-allowed" || event.error === "service-not-allowed") {
+            alert("Microphone access is blocked. Please allow microphone permission for this site in your browser settings.");
+        } else if (event.error === "no-speech") {
+            // Nothing said -- not a real error, just reset quietly.
+        } else if (event.error === "network") {
+            alert("Speech recognition needs an internet connection.");
+        }
     };
 
     recognition.onend = () => {
@@ -176,8 +193,16 @@ if (SpeechRecognitionAPI && micBtn) {
     micBtn.addEventListener("click", () => {
         if (isListening) {
             recognition.stop();
-        } else {
+            return;
+        }
+        try {
             recognition.start();
+        } catch (err) {
+            // Fires if start() is called while recognition is already active
+            // (e.g. state got out of sync after a previous error) -- reset and retry.
+            console.error("Could not start speech recognition:", err);
+            isListening = false;
+            micBtn.classList.remove("listening");
         }
     });
 } else if (micBtn) {
