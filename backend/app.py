@@ -12,7 +12,7 @@ from sqlalchemy import text
 load_dotenv()
 
 from models import db, User, ChatHistory, ChatSession
-from rag.rag_utils import build_or_update_index, answer_question, summarize_document
+from rag.rag_utils import build_or_update_index, answer_question, summarize_document, OCRError, IMAGE_EXTENSIONS
 from face_utils import decode_base64_image, get_face_embedding, embedding_to_json, find_matching_user, FaceNotDetectedError, MultipleFacesDetectedError
 from clerk_utils import (
     is_clerk_configured,
@@ -26,7 +26,8 @@ from clerk_utils import (
 
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
 UPLOAD_FOLDER = os.path.join(BASE_DIR, "uploads")
-ALLOWED_EXTENSIONS = {"pdf", "txt", "docx", "csv"}
+# Images (png/jpg/webp/bmp/tiff/gif) aur scanned PDFs OCR se padhe jate hain (rag/ocr.py).
+ALLOWED_EXTENSIONS = {"pdf", "txt", "docx", "csv"} | IMAGE_EXTENSIONS
 
 # Project layout: backend/ (this file) and frontend/ (templates + static) are
 # now separate sibling folders, so Flask is pointed explicitly at frontend/
@@ -405,7 +406,7 @@ def upload():
 
     file = request.files["document"]
     if file.filename == "" or not allowed_file(file.filename):
-        return jsonify({"error": "Only .pdf, .txt, .docx, or .csv files are allowed."}), 400
+        return jsonify({"error": "Only PDF, TXT, DOCX, CSV or image files (PNG, JPG, WEBP, BMP, TIFF, GIF) are allowed."}), 400
 
     os.makedirs(app.config["UPLOAD_FOLDER"], exist_ok=True)
     save_path = os.path.join(app.config["UPLOAD_FOLDER"], f"{current_user.id}_{file.filename}")
@@ -416,7 +417,17 @@ def upload():
     # ho jaye jisme wo document upload kiya gaya tha -- yani ek hi session
     # me upload aur uske baad wale sawal sath nazar aate hain.
     session_id = request.form.get("session_id") or None
-    num_chunks = build_or_update_index(current_user.id, save_path, file.filename, session_id=session_id)
+    try:
+        num_chunks = build_or_update_index(current_user.id, save_path, file.filename, session_id=session_id)
+    except OCRError as e:
+        # Scanned file / image ko OCR se padhte waqt masla (key missing, model busy, kharab image)
+        return jsonify({"error": str(e)}), 422
+    except Exception as e:
+        print(f"[Upload] could not process '{file.filename}': {e}")
+        return jsonify({"error": "Could not read this file. It may be corrupted or password-protected."}), 422
+
+    if num_chunks == 0:
+        return jsonify({"error": "No readable text was found in this file. If it is a scan or photo, please upload a clearer image."}), 422
 
     return jsonify({
         "message": f"'{file.filename}' uploaded and {num_chunks} chunks added to the index.",

@@ -91,6 +91,11 @@ FORMATTING RULES (follow exactly -- the answer is rendered as rich text):
    question!"), no closing sales pitch, and no phrases like "According to
    the document/resume" -- just state the fact.
 10. Respond in English.
+11. Write math and formulas as PLAIN TEXT with Unicode symbols, never LaTeX:
+    no "$" signs, no backslash commands. Example: P(x) = 1 / √(2πσ²) × e^(-(x-μ)² / (2σ²)).
+12. When the question asks what the document itself contains (a formula, table,
+    worked example, steps, values), reproduce it as written in the document --
+    same numbers, symbols and order -- instead of re-deriving or rewording it.
 """.strip()
 
 FALLBACKS = {
@@ -149,6 +154,11 @@ Rules for answering:
    not a requirement.
 5. When a specific figure, name or date comes from the document, bold it so
    the reader can spot what was grounded in their file.
+6. If the question asks to list every item of a kind (all headings, all
+   section titles, all names, all dates, etc.), scan the ENTIRE context
+   given to you and include every matching item you find, in the order
+   they appear -- never sample a few and stop early, and never invent an
+   item that isn't actually in the context.
 
 After writing the visible answer, add exactly two hidden marker lines at
 the very end, on their own lines, with nothing after them. These are

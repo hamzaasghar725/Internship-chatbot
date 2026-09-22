@@ -52,8 +52,13 @@ from rag.indexing import (
     build_or_update_index,
     chunk_text,
     extract_text,
+    extract_text_ex,
+    load_full_document_text,
     retrieve_relevant_chunks,
 )
+
+# ---- OCR (scanned PDFs / images) ----
+from rag.ocr import IMAGE_EXTENSIONS, OCRError
 
 # ---- Gemini client ----
 from rag.gemini_client import (
@@ -94,6 +99,10 @@ __all__ = [
     "get_embed_model",
     "embed_query",
     "extract_text",
+    "extract_text_ex",
+    "load_full_document_text",
+    "OCRError",
+    "IMAGE_EXTENSIONS",
     "chunk_text",
     "build_or_update_index",
     "retrieve_relevant_chunks",

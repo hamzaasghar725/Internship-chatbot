@@ -1,4 +1,5 @@
 """Direct HTTP client for the Gemini API (no SDK), with retries and model fallback."""
+import base64
 import os
 import time
 
@@ -32,12 +33,35 @@ class GeminiResponseError(Exception):
     pass
 
 
-def _post_to_gemini(model_name, api_key, prompt, max_retries=2):
+def _post_to_gemini(model_name, api_key, prompt, max_retries=2, images=None,
+                    max_output_tokens=None, temperature=None, timeout=None):
     """
     Calls Gemini with one specific model name, retrying on temporary errors.
     Returns (answer_text, usage_dict) where usage_dict has input/output/total tokens.
+
+    OCR ke liye teen optional cheezein:
+      images            -- [(mime_type, raw_bytes), ...]; prompt se pehle bheji
+                           jati hain (Gemini vision image ko "padh" leta hai)
+      max_output_tokens -- default 4096 se zyada (ek dense page ka poora text)
+      temperature       -- OCR me 0.0 taake model text "banaye" nahi, sirf copy kare
+    Teeno None hon to behaviour bilkul pehle jaisa hai.
     """
     url = f"https://generativelanguage.googleapis.com/v1beta/models/{model_name}:generateContent"
+
+    parts = []
+    for mime_type, raw_bytes in (images or []):
+        parts.append({"inline_data": {
+            "mime_type": mime_type,
+            "data": base64.b64encode(raw_bytes).decode("ascii"),
+        }})
+    parts.append({"text": prompt})
+
+    generation_config = {
+        "temperature": GEMINI_TEMPERATURE if temperature is None else temperature,
+        "maxOutputTokens": max_output_tokens or GEMINI_MAX_OUTPUT_TOKENS,
+    }
+    request_timeout = timeout or (120 if images else 30)  # image/OCR calls are slower than text-only ones
+
     last_error = None
     for attempt in range(max_retries):
         try:
@@ -48,13 +72,10 @@ def _post_to_gemini(model_name, api_key, prompt, max_retries=2):
                     "Content-Type": "application/json",
                 },
                 json={
-                    "contents": [{"parts": [{"text": prompt}]}],
-                    "generationConfig": {
-                        "temperature": GEMINI_TEMPERATURE,
-                        "maxOutputTokens": GEMINI_MAX_OUTPUT_TOKENS,
-                    },
+                    "contents": [{"parts": parts}],
+                    "generationConfig": generation_config,
                 },
-                timeout=30,
+                timeout=request_timeout,
             )
             response.raise_for_status()
             data = response.json()
@@ -74,7 +95,11 @@ def _post_to_gemini(model_name, api_key, prompt, max_retries=2):
                     f"no content parts in response (finishReason={finish_reason}, raw={str(candidate)[:300]})"
                 )
 
-            answer_text = parts[0].get("text", "")
+            # Lambe jawab (khaas kar OCR) kabhi kabhi kai "parts" me aate hain --
+            # sab ka text jodte hain (thinking wale parts chhod kar).
+            answer_text = "".join(
+                p.get("text", "") for p in parts if not p.get("thought")
+            )
             if not answer_text:
                 raise GeminiResponseError(f"empty text in response part (raw={str(parts[0])[:300]})")
 
@@ -102,7 +127,9 @@ def _post_to_gemini(model_name, api_key, prompt, max_retries=2):
     raise last_error
 
 
-def _call_gemini(prompt, trace_name="gemini-call", metadata=None, langfuse_prompt=None):
+def _call_gemini(prompt, trace_name="gemini-call", metadata=None, langfuse_prompt=None,
+                 images=None, max_output_tokens=None, temperature=None,
+                 timeout=None, max_retries=None, max_models=None):
     """
     Calls the Gemini REST API directly over HTTP (no SDK, to avoid
     protobuf/tensorflow version conflicts).
@@ -117,6 +144,12 @@ def _call_gemini(prompt, trace_name="gemini-call", metadata=None, langfuse_promp
     `langfuse_prompt` (optional): the prompt object returned by
     prompt_registry.get_prompt(). When provided, it's linked to this
     generation so the Langfuse UI shows which prompt version produced it.
+    `images` / `max_output_tokens` / `temperature` (optional): used by the
+    OCR module (rag/ocr.py) -- see _post_to_gemini(). Image bytes are never
+    sent to Langfuse, only the image count.
+    `timeout` / `max_retries` / `max_models` (optional): OCR me upload "atak"
+    na jaye -- har call ka timeout, retries, aur kitne models try karne hain
+    (default: sab, jaisa pehle tha).
     """
     global _working_model_name
     api_key = os.environ.get("GEMINI_API_KEY")
@@ -129,6 +162,13 @@ def _call_gemini(prompt, trace_name="gemini-call", metadata=None, langfuse_promp
     models_to_try = ([_working_model_name] if _working_model_name else []) + \
         [m for m in GEMINI_MODEL_CANDIDATES if m != _working_model_name]
 
+    if max_models:
+        models_to_try = models_to_try[:max_models]
+
+    post_kwargs = dict(images=images, max_output_tokens=max_output_tokens, temperature=temperature, timeout=timeout)
+    if max_retries:
+        post_kwargs["max_retries"] = max_retries
+
     last_error = None
     for model_name in models_to_try:
         try:
@@ -139,17 +179,17 @@ def _call_gemini(prompt, trace_name="gemini-call", metadata=None, langfuse_promp
                     model=model_name,
                     input=prompt,
                     model_parameters={
-                        "temperature": GEMINI_TEMPERATURE,
-                        "max_completion_tokens": GEMINI_MAX_OUTPUT_TOKENS,
+                        "temperature": GEMINI_TEMPERATURE if temperature is None else temperature,
+                        "max_completion_tokens": max_output_tokens or GEMINI_MAX_OUTPUT_TOKENS,
                     },
-                    metadata=metadata or {},
+                    metadata={**(metadata or {}), **({"image_count": len(images)} if images else {})},
                     prompt=langfuse_prompt,
                 ) as generation:
-                    answer, token_usage = _post_to_gemini(model_name, api_key, prompt)
+                    answer, token_usage = _post_to_gemini(model_name, api_key, prompt, **post_kwargs)
                     generation.update(output=answer, usage_details=token_usage)
                 langfuse.flush()  # send the trace to Langfuse right away
             else:
-                answer, token_usage = _post_to_gemini(model_name, api_key, prompt)
+                answer, token_usage = _post_to_gemini(model_name, api_key, prompt, **post_kwargs)
 
             _working_model_name = model_name  # cache this model for next time
             return answer

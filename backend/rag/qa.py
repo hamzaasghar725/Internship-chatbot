@@ -1,11 +1,17 @@
 """Top-level RAG pipeline: question answering and document summarization."""
 import os
 import pickle
+import re
 
 from rag.answer_formatting import enforce_scope, polish_answer, _split_markers
 from rag.embeddings import EMBED_MODEL_NAME, embed_query
 from rag.gemini_client import _safe_call_gemini
-from rag.indexing import _paths_for_user, _user_has_index, retrieve_relevant_chunks
+from rag.indexing import (
+    _paths_for_user,
+    _user_has_index,
+    load_full_document_text,
+    retrieve_relevant_chunks,
+)
 from rag.prompt_registry import get_prompt
 from rag.tracing import (
     TRACE_APP_TAG,
@@ -17,6 +23,106 @@ from rag.tracing import (
     _tag_trace,
     _update,
 )
+
+
+# "Poora document / har lafz / word by word / as-is dedo" jaisi requests --
+# English aur Roman Urdu dono. In par RAG (top-k chunks + LLM) bypass ho kar
+# poora saved text seedha laut jata hai, taake na kuch chhoote aur na model
+# apni taraf se paraphrase/summarize kare.
+_FULL_DOCUMENT_RE = re.compile(
+    r"\b("
+    r"(entire|whole|full|complete)\s+(document|text|content|data|doc)"
+    r"|word[\s-]?(for|by)[\s-]?word"
+    r"|single\s+single\s+word"
+    r"|verbatim"
+    r"|as[\s-]is"
+    r"|jaisa\s+hai\s+waisa"
+    r"|(poora|pura|sara|sari|puri)\s+(document|text|data)"
+    r"|har\s+(lafz|word)"
+    r"|lafz\s+lafz"
+    r")\b",
+    re.IGNORECASE,
+)
+
+# Agar query kisi KHAAS cheez ke baare me poochti hai (headings, titles,
+# ek list, summary...) to "poori document" jaise alfaz sirf is context ke
+# hisse hote hain -- poora raw text dump nahi chahiye hota, sirf wo khaas
+# cheez chahiye hoti hai. Aisi requests ko full-document bypass se bahar
+# rakhte hain taake "poori document ki headings do" ulta poora text na de de.
+_SUBSET_ASK_RE = re.compile(
+    r"\b("
+    r"headings?|titles?|sections?|subheadings?"
+    r"|table\s+of\s+contents|\btoc\b"
+    r"|summary|summarize|summarise"
+    r"|keywords?"
+    r"|list\s+of|outline"
+    r"|sirf|only|just"
+    r")\b",
+    re.IGNORECASE,
+)
+
+
+def _wants_full_document(query):
+    query = query or ""
+    if not _FULL_DOCUMENT_RE.search(query):
+        return False
+    return not _SUBSET_ASK_RE.search(query)
+
+
+# "Headings/titles/sections/outline do" -- top-k retrieval (sirf 4-6 chunks)
+# document ke chunks ko RANDOMLY thori si jagah se uthata hai, is liye 15 me
+# se sirf 3-4 headings milti hain (baaki jin chunks me thin wo retrieve hi
+# nahi hote). Ye sawal poore document ka structure maangte hain, kisi ek
+# jagah ka fact nahi -- is liye inke liye top-k bypass kar ke POORA document
+# context me diya jata hai, taake koi heading na chhoote.
+_STRUCTURE_ASK_RE = re.compile(
+    r"\b(headings?|titles?|sections?|subheadings?|table\s+of\s+contents|\btoc\b|outline)\b",
+    re.IGNORECASE,
+)
+
+
+def _wants_document_structure(query):
+    return bool(_STRUCTURE_ASK_RE.search(query or ""))
+
+
+# "Exact text in Product Roadmap", "verbatim text of Finance and Budget"...
+# Numbered headings ("8. Product Roadmap") ko dhoondh kar us heading se agli
+# heading TAK ka asal text (jaisa document me hai) seedha wapas karte hain --
+# model se dobara likhwate nahi, taake wo apni taraf se naye sub-headings ya
+# bullets na bana de.
+_EXACT_CUE_RE = re.compile(
+    r"\b("
+    r"exact|verbatim|raw"
+    r"|word[\s-]?for[\s-]?word|word[\s-]?by[\s-]?word"
+    r"|as[\s-]is|jaisa\s+hai\s+waisa"
+    r")\b",
+    re.IGNORECASE,
+)
+
+# Ek poori line jo sirf "8. Product Roadmap" jaisi ho (number + short title,
+# koi aur punctuation nahi) -- document ke numbered section headings.
+_HEADING_LINE_RE = re.compile(r"^[ \t]*\d{1,2}\.\s+([A-Z][A-Za-z][A-Za-z &/\-]{1,60})[ \t]*$", re.MULTILINE)
+
+
+def _extract_named_section(query, full_text):
+    """
+    Query me kisi heading ka naam (jaise "Product Roadmap") mile aur wo
+    document ke numbered headings me se kisi se match ho, to us heading se
+    lekar AGLI heading tak ka asal (raw) text return karta hai.
+    Match na ho to None.
+    """
+    headings = list(_HEADING_LINE_RE.finditer(full_text or ""))
+    if not headings:
+        return None
+    query_lower = (query or "").lower()
+    for i, m in enumerate(headings):
+        title = m.group(1).strip()
+        if title.lower() in query_lower:
+            start = m.end()
+            end = headings[i + 1].start() if i + 1 < len(headings) else len(full_text)
+            section_text = full_text[start:end].strip()
+            return title, section_text
+    return None
 
 
 def answer_question(user_id, query, session_id=None, top_k=4):
@@ -56,29 +162,105 @@ def answer_question(user_id, query, session_id=None, top_k=4):
             session_id=session_id,
             metadata={"mode": "chat"},
         ):
+            has_document = _user_has_index(user_id)
             _emit_event(langfuse, "chat-request", metadata={
                 "queryLength": len(query),
                 "queryWords": len(query.split()),
                 "topK": top_k,
-                "hasDocument": _user_has_index(user_id),
+                "hasDocument": has_document,
             })
 
-            # ---- 1. Query embedding ----
-            with _observe(langfuse, "embedding", as_type="span",
-                          input={"model": EMBED_MODEL_NAME, "query": query}) as span:
-                query_vec = embed_query(query)
-                _update(span, output={"dimensions": int(query_vec.shape[1])})
+            # ---- 0a. "Exact text of <section heading>" -> that section, raw ----
+            if has_document and _EXACT_CUE_RE.search(query):
+                full_text, filename = load_full_document_text(user_id)
+                found = _extract_named_section(query, full_text) if full_text else None
+                if found:
+                    title, section_text = found
+                    if section_text:
+                        _emit_event(langfuse, "mode-selected", metadata={
+                            "mode": "exact-section",
+                            "reason": f"query asked for the exact/verbatim text of section '{title}'",
+                        })
+                        answer = section_text
+                        _emit_event(langfuse, "chat-completed", metadata={
+                            "answerLength": len(answer),
+                            "sourceCount": 1,
+                            "sources": [filename] if filename else [],
+                            "contextUsed": True,
+                        })
+                        _tag_trace(
+                            langfuse,
+                            tags=[TRACE_APP_TAG, "chat", "exact-section", "context-used"],
+                            output={"answerLength": len(answer), "sources": [filename] if filename else []},
+                        )
+                        _update(root_span, output={
+                            "answer": answer, "sources": [filename] if filename else [],
+                            "answerLength": len(answer), "sourceUsed": True,
+                        })
+                        _flush(langfuse)
+                        return answer, ([filename] if filename else [])
 
-            # ---- 2. Retrieval ----
-            with _observe(langfuse, "retrieval", as_type="retriever",
-                          input={"query": query, "topK": top_k}) as span:
-                chunks = retrieve_relevant_chunks(user_id, query, top_k=top_k, query_vec=query_vec)
-                retrieved_sources = list({c["source"] for c in chunks})
-                _update(span, output={
-                    "chunkCount": len(chunks),
-                    "sources": retrieved_sources,
-                    "bestDistance": round(chunks[0]["distance"], 4) if chunks else None,
-                })
+            # ---- 0b. "Give me the whole document" -> skip RAG entirely ----
+            # Top-k retrieval sirf 4 chunks (~2000 chars) deta hai, is liye
+            # "poora document do" jaisi requests ka jawab hamesha adhoora ya
+            # LLM ka paraphrase hota -- yahan seedha poora saved text lautate
+            # hain, bilkul jaisa document se nikla tha.
+            if has_document and _wants_full_document(query):
+                full_text, filename = load_full_document_text(user_id)
+                if full_text and full_text.strip():
+                    _emit_event(langfuse, "mode-selected", metadata={
+                        "mode": "full-document",
+                        "reason": "query asked for the entire document verbatim",
+                    })
+                    answer = full_text.strip()
+                    _emit_event(langfuse, "chat-completed", metadata={
+                        "answerLength": len(answer),
+                        "sourceCount": 1,
+                        "sources": [filename] if filename else [],
+                        "contextUsed": True,
+                    })
+                    _tag_trace(
+                        langfuse,
+                        tags=[TRACE_APP_TAG, "chat", "full-document", "context-used"],
+                        output={"answerLength": len(answer), "sources": [filename] if filename else []},
+                    )
+                    _update(root_span, output={
+                        "answer": answer, "sources": [filename] if filename else [],
+                        "answerLength": len(answer), "sourceUsed": True,
+                    })
+                    _flush(langfuse)
+                    return answer, ([filename] if filename else [])
+
+            # ---- 1/2. Query embedding + retrieval ----
+            # "headings/sections/outline do" jaise sawal document ka poora
+            # structure maangte hain -- top-k ki jagah poora document ek
+            # context ki tarah use hota hai, taake koi heading na chhoote.
+            if has_document and _wants_document_structure(query):
+                full_text, filename = load_full_document_text(user_id)
+                if full_text and full_text.strip():
+                    chunks = [{"source": filename, "text": full_text, "distance": 0.0}]
+                    retrieved_sources = [filename] if filename else []
+                    _emit_event(langfuse, "retrieval-override", metadata={
+                        "reason": "structure question -- using full document instead of top-k chunks",
+                        "characters": len(full_text),
+                    })
+                else:
+                    chunks, retrieved_sources = [], []
+            else:
+                with _observe(langfuse, "embedding", as_type="span",
+                              input={"model": EMBED_MODEL_NAME, "query": query}) as span:
+                    query_vec = embed_query(query)
+                    _update(span, output={"dimensions": int(query_vec.shape[1])})
+
+                with _observe(langfuse, "retrieval", as_type="retriever",
+                              input={"query": query, "topK": top_k}) as span:
+                    chunks = retrieve_relevant_chunks(user_id, query, top_k=top_k, query_vec=query_vec)
+                    retrieved_sources = list({c["source"] for c in chunks})
+                    _update(span, output={
+                        "chunkCount": len(chunks),
+                        "sources": retrieved_sources,
+                        "bestDistance": round(chunks[0]["distance"], 4) if chunks else None,
+                    })
 
             # ---- 3. Mode ----
             mode = "rag" if chunks else "general-chat"

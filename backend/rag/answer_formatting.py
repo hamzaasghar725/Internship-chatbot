@@ -54,6 +54,89 @@ def _polish_line(line):
     return line.rstrip()
 
 
+# ---------------------------------------------------------------------------
+# LaTeX -> plain text
+# ---------------------------------------------------------------------------
+# Chat UI LaTeX render nahi karti, is liye model ka "$$P(x)=\frac{1}{\sqrt{2\pi\sigma^2}}$$"
+# screen par kacha dikhta tha. Yahan LaTeX ko seedhe, parhne layak text me badalte
+# hain: P(x) = (1)/(√(2πσ²)). Prompt me bhi mana kiya gaya hai; ye safety net hai
+# (khaas taur par jab Langfuse par purana prompt chal raha ho).
+_LATEX_SYMBOLS = {
+    r"\times": "×", r"\cdot": "·", r"\div": "÷", r"\pm": "±", r"\mp": "∓",
+    r"\leq": "≤", r"\le": "≤", r"\geq": "≥", r"\ge": "≥", r"\neq": "≠", r"\ne": "≠",
+    r"\approx": "≈", r"\propto": "∝", r"\infty": "∞", r"\sum": "Σ", r"\prod": "Π",
+    r"\rightarrow": "→", r"\to": "→", r"\leftarrow": "←", r"\Rightarrow": "⇒",
+    r"\mid": "|", r"\ldots": "...", r"\dots": "...", r"\cdots": "...", r"\%": "%",
+    r"\alpha": "α", r"\beta": "β", r"\gamma": "γ", r"\delta": "δ", r"\epsilon": "ε",
+    r"\theta": "θ", r"\lambda": "λ", r"\mu": "μ", r"\pi": "π", r"\rho": "ρ",
+    r"\sigma": "σ", r"\tau": "τ", r"\phi": "φ", r"\omega": "ω",
+    r"\Delta": "Δ", r"\Sigma": "Σ", r"\Omega": "Ω", r"\Theta": "Θ", r"\Pi": "Π",
+}
+_SUPERSCRIPTS = {"0": "⁰", "1": "¹", "2": "²", "3": "³", "4": "⁴", "5": "⁵",
+                 "6": "⁶", "7": "⁷", "8": "⁸", "9": "⁹", "-": "⁻", "+": "⁺", "n": "ⁿ"}
+_LATEX_CUE = re.compile(r"\\[a-zA-Z]+|\^|_\{|\{|\}")
+
+
+def _frac(m):
+    """Chhote numerator/denominator par bracket nahi: 4/8; baaki (a+b)/(c)."""
+    a, b = m.group(1).strip(), m.group(2).strip()
+    wrap = lambda t: t if re.fullmatch(r"[\w.]+", t) else "(" + t + ")"
+    return wrap(a) + "/" + wrap(b)
+
+
+def _convert_math(text):
+    """Ek math tukde (delimiters ke baghair) ko plain text banata hai."""
+    # \text{..}, \mathrm{..}, \mathbf{..}, \operatorname{..} -> andar ka text
+    text = re.sub(r"\\(?:text|textbf|textit|mathrm|mathbf|mathit|operatorname|boldsymbol)\s*\{([^{}]*)\}", r"\1", text)
+    # \frac{a}{b} -> (a)/(b)   (nested ke liye kai baar)
+    for _ in range(4):
+        new = re.sub(r"\\[dt]?frac\s*\{([^{}]*)\}\s*\{([^{}]*)\}", _frac, text)
+        new = re.sub(r"\\sqrt\s*\{([^{}]*)\}", r"√(\1)", new)
+        if new == text:
+            break
+        text = new
+    text = re.sub(r"\\sqrt\s*(\w)", r"√\1", text)
+    for cmd in sorted(_LATEX_SYMBOLS, key=len, reverse=True):
+        text = re.sub(re.escape(cmd) + r"(?![a-zA-Z])", _LATEX_SYMBOLS[cmd], text)
+    # \left( \right) \, \; \! \quad
+    text = re.sub(r"\\(?:left|right|big|Big|bigg|Bigg)\s*", "", text)
+    text = re.sub(r"\\[,;:!]|\\q?quad", " ", text)
+    text = text.replace(r"\{", "{").replace(r"\}", "}").replace(r"\_", "_").replace(r"\&", "&")
+    # exponents / subscripts
+    text = re.sub(r"\^\{([^{}]*)\}", lambda m: "".join(_SUPERSCRIPTS.get(c, "") for c in m.group(1))
+                  if m.group(1) and all(c in _SUPERSCRIPTS for c in m.group(1)) else "^(" + m.group(1) + ")", text)
+    text = re.sub(r"\^([0-9])", lambda m: _SUPERSCRIPTS[m.group(1)], text)
+    text = re.sub(r"_\{([^{}]*)\}", lambda m: "_" + m.group(1) if len(m.group(1)) == 1 else "_(" + m.group(1) + ")", text)
+    return text
+
+
+def latex_to_plain(text):
+    """
+    LaTeX (\\frac, \\sigma, $...$, $$...$$, \\(...\\), \\[...\\]) ko plain text me badalta hai.
+    Code blocks (``` ... ```) ko nahi chhota. Dollar sirf tab math maane jate hain jab
+    dono taraf space na ho aur andar math ki nishani ho -- taake "$5 aur $10" jaisi
+    rakam kharab na ho.
+    """
+    if not text or ("\\" not in text and "$" not in text and "^{" not in text):
+        return text
+
+    parts = re.split(r"(```.*?```)", text, flags=re.DOTALL)
+    for i in range(0, len(parts), 2):
+        seg = parts[i]
+        seg = re.sub(r"\$\$(.+?)\$\$", lambda m: _convert_math(m.group(1)).strip(), seg, flags=re.DOTALL)
+        seg = re.sub(r"\\\[(.+?)\\\]", lambda m: _convert_math(m.group(1)).strip(), seg, flags=re.DOTALL)
+        seg = re.sub(r"\\\((.+?)\\\)", lambda m: _convert_math(m.group(1)).strip(), seg, flags=re.DOTALL)
+
+        def _single(m):
+            inner = m.group(1)
+            return _convert_math(inner) if (_LATEX_CUE.search(inner) or re.search(r"[A-Za-z=()]", inner)) else m.group(0)
+
+        seg = re.sub(r"(?<![\\\w$])\$(?!\s)([^$\n]+?)(?<!\s)\$(?![\w$])", _single, seg)
+        seg = _convert_math(seg) if "\\" in seg else seg   # $ ke baghair likhe commands bhi
+        parts[i] = seg
+    return "".join(parts)
+
+
 def polish_answer(text):
     """
     Model ke jawab ki formatting ko normalize karta hai.
@@ -65,6 +148,7 @@ def polish_answer(text):
         return text
 
     text = text.replace("\r\n", "\n").replace("\r", "\n")
+    text = latex_to_plain(text)
     text = _FILLER_OPENERS.sub("", text, count=1)
 
     # Har paragraph ke shuru se "According to the document/resume, " hata

@@ -1,11 +1,13 @@
 """Document ingestion: text extraction, chunking, and the per-user FAISS index."""
+import csv
 import os
 import pickle
+import re
 
 import faiss
-from PyPDF2 import PdfReader
 
 from rag.embeddings import EMBED_MODEL_NAME, embed_query, get_embed_model
+from rag.ocr import IMAGE_EXTENSIONS, OCRError, extract_image_text, extract_pdf_text
 from rag.tracing import (
     TRACE_APP_TAG,
     _attributes,
@@ -28,24 +30,93 @@ def _user_has_index(user_id):
     return os.path.exists(index_path)
 
 
+def _extract_docx_text(file_path):
+    """Word file: paragraphs + tables (table cells ek line me '|' se juda)."""
+    from docx import Document
+
+    doc = Document(file_path)
+    lines = [p.text for p in doc.paragraphs if p.text.strip()]
+    for table in doc.tables:
+        for row in table.rows:
+            cells = [c.text.strip() for c in row.cells if c.text.strip()]
+            if cells:
+                lines.append(" | ".join(cells))
+    return "\n".join(lines)
+
+
+def _extract_csv_text(file_path):
+    """CSV: har row 'column: value, column: value' line ban jati hai -- retrieval ke liye behtar."""
+    with open(file_path, "r", encoding="utf-8-sig", errors="ignore", newline="") as f:
+        sample = f.read(4096)
+        f.seek(0)
+        try:
+            dialect = csv.Sniffer().sniff(sample)
+        except csv.Error:
+            dialect = csv.excel
+        rows = [r for r in csv.reader(f, dialect) if any(c.strip() for c in r)]
+    if not rows:
+        return ""
+    header, body = rows[0], rows[1:]
+    if not body:
+        return ", ".join(header)
+    return "\n".join(
+        ", ".join(f"{h.strip() or f'col{i + 1}'}: {v.strip()}" for i, (h, v) in enumerate(zip(header, row)))
+        for row in body
+    )
+
+
+def extract_text_ex(file_path):
+    """
+    File -> (text, info). `info` me OCR ki tafseel hoti hai (kitne pages OCR
+    hue, kitne fail hue) jo Langfuse ke extract-text span me dikhti hai.
+
+    Scanned PDFs aur images (Chinese/complex bhi) rag/ocr.py se OCR hote hain;
+    baaki formats direct parse hote hain. OCR ki koi user-facing ghalti
+    OCRError ban kar upar jati hai (app.py /upload usay saaf message me badalta hai).
+    """
+    ext = os.path.splitext(file_path)[1].lower().lstrip(".")
+    if ext == "pdf":
+        return extract_pdf_text(file_path)
+    if ext in IMAGE_EXTENSIONS:
+        return extract_image_text(file_path)
+    if ext == "docx":
+        return _extract_docx_text(file_path), {"kind": "docx"}
+    if ext == "csv":
+        return _extract_csv_text(file_path), {"kind": "csv"}
+    # .txt and other plain text files
+    with open(file_path, "r", encoding="utf-8", errors="ignore") as f:
+        return f.read(), {"kind": "text"}
+
+
 def extract_text(file_path):
-    """Extracts text from a PDF or TXT file."""
-    if file_path.lower().endswith(".pdf"):
-        reader = PdfReader(file_path)
-        text = ""
-        for page in reader.pages:
-            text += (page.extract_text() or "") + "\n"
-        return text
-    else:  # .txt and other plain text files
-        with open(file_path, "r", encoding="utf-8", errors="ignore") as f:
-            return f.read()
+    """Extracts text from a PDF (normal or scanned), image, DOCX, CSV or TXT file."""
+    return extract_text_ex(file_path)[0]
+
+
+CJK_CHUNK_SIZE = 250     # Chinese/Japanese/Korean: 1 character ~ 1-2 tokens, is liye chhota chunk
+CJK_CHUNK_OVERLAP = 40
+_CJK_RE = re.compile(r"[\u3040-\u30ff\u3400-\u4dbf\u4e00-\u9fff\uac00-\ud7af\uf900-\ufaff]")
+
+
+def _cjk_ratio(text):
+    sample = text[:5000]
+    if not sample:
+        return 0.0
+    return len(_CJK_RE.findall(sample)) / len(sample)
 
 
 def chunk_text(text, chunk_size=CHUNK_SIZE, overlap=CHUNK_OVERLAP):
-    """Splits text into overlapping chunks so context isn't lost at boundaries."""
+    """Splits text into overlapping chunks so context isn't lost at boundaries.
+
+    Agar text zyada-tar Chinese/Japanese/Korean hai (aur caller ne default
+    sizes hi use kiye), to chhote chunks (250 chars) banate hain -- warna 500
+    CJK characters embedding model ki token limit se bahar chale jate hain
+    aur chunk ka aakhri hissa search me shamil hi nahi hota."""
+    text = text.strip()
+    if (chunk_size, overlap) == (CHUNK_SIZE, CHUNK_OVERLAP) and _cjk_ratio(text) > 0.3:
+        chunk_size, overlap = CJK_CHUNK_SIZE, CJK_CHUNK_OVERLAP
     chunks = []
     start = 0
-    text = text.strip()
     while start < len(text):
         end = start + chunk_size
         chunks.append(text[start:end])
@@ -59,6 +130,50 @@ def _paths_for_user(user_id):
     index_path = os.path.join(user_dir, "index.faiss")
     meta_path = os.path.join(user_dir, "meta.pkl")
     return index_path, meta_path
+
+
+def _model_marker_path(user_id):
+    return os.path.join(VECTORSTORE_DIR, str(user_id), "embed_model.txt")
+
+
+def _full_text_path(user_id):
+    return os.path.join(VECTORSTORE_DIR, str(user_id), "full_text.txt")
+
+
+def load_full_document_text(user_id):
+    """
+    Poora extracted text (chunk hone SE PEHLE, jaisa document se nikla tha)
+    -- "poora document as-is dedo" jaisi requests ke liye. Har naye upload
+    par overwrite hota hai (index bhi waisi hi replace hoti hai), is liye
+    hamesha abhi ke active document se match karta hai.
+    Return: (text, filename) ya (None, None) agar kuch upload hi nahi hua.
+    """
+    index_path, meta_path = _paths_for_user(user_id)
+    text_path = _full_text_path(user_id)
+    if not (os.path.exists(index_path) and os.path.exists(text_path)):
+        return None, None
+    try:
+        with open(meta_path, "rb") as f:
+            metadata = pickle.load(f)
+        filename = metadata[0]["source"] if metadata else None
+        with open(text_path, "r", encoding="utf-8") as f:
+            return f.read(), filename
+    except (OSError, EOFError, pickle.PickleError, IndexError, KeyError):
+        return None, None
+
+
+def _index_matches_current_model(user_id):
+    """
+    True sirf tab jab is user ka index usi embedding model se bana ho jo abhi
+    load hai. Model badalne se pehle bane indexes ke vectors naye model ke
+    query vectors se compare nahi ho sakte (dimension same ho tab bhi) -- unhe
+    ignore karte hain taake bekaar/ghalat retrieval na ho.
+    """
+    try:
+        with open(_model_marker_path(user_id), "r", encoding="utf-8") as f:
+            return f.read().strip() == EMBED_MODEL_NAME
+    except OSError:
+        return False
 
 
 def build_or_update_index(user_id, file_path, filename, session_id=None):
@@ -95,10 +210,11 @@ def build_or_update_index(user_id, file_path, filename, session_id=None):
             # ---- 1. Text extraction ----
             with _observe(langfuse, "extract-text", as_type="span",
                           input={"filename": filename, "fileType": file_type}) as span:
-                text = extract_text(file_path)
+                text, extract_info = extract_text_ex(file_path)
                 _update(span, output={
                     "characters": len(text),
                     "isEmpty": not text.strip(),
+                    **{k: v for k, v in extract_info.items() if k != "kind"},
                 })
 
             # ---- 2. Chunking ----
@@ -113,9 +229,9 @@ def build_or_update_index(user_id, file_path, filename, session_id=None):
                 })
 
             if not chunks:
-                # Scanned PDF ya khaali file -- yahin ruk jate hain.
+                # Khaali file, ya OCR ko bhi koi text nahi mila -- yahin ruk jate hain.
                 _emit_event(langfuse, "ingest-skipped", metadata={
-                    "reason": "no extractable text (scanned PDF or empty file?)",
+                    "reason": "no extractable text (empty file, or OCR found no text)",
                     "filename": filename,
                 })
                 _tag_trace(
@@ -155,6 +271,12 @@ def build_or_update_index(user_id, file_path, filename, session_id=None):
                 faiss.write_index(index, index_path)
                 with open(meta_path, "wb") as f:
                     pickle.dump(metadata, f)
+                with open(_model_marker_path(user_id), "w", encoding="utf-8") as f:
+                    f.write(EMBED_MODEL_NAME)
+                # "poora document as-is dedo" jaisi requests ke liye asal text
+                # (chunking se pehle) alag se save karte hain.
+                with open(_full_text_path(user_id), "w", encoding="utf-8") as f:
+                    f.write(text)
 
                 _update(span, output={
                     "vectorsInIndex": int(index.ntotal),
@@ -202,6 +324,9 @@ def retrieve_relevant_chunks(user_id, query, top_k=4, query_vec=None):
     """
     index_path, meta_path = _paths_for_user(user_id)
     if not os.path.exists(index_path):
+        return []
+    if not _index_matches_current_model(user_id):
+        print(f"[RAG] user {user_id}: index was built with a different embedding model -- ignoring it, please re-upload the document.")
         return []
 
     index = faiss.read_index(index_path)
