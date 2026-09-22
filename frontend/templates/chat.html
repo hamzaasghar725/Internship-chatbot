@@ -79,7 +79,7 @@
         <!-- File picker aur asli upload trigger. Ye chhupe hue hain: composer ka
              clip button aur drag-and-drop inhi ko chalate hain, is liye upload
              ka sirf 1 visible button banta hai. -->
-        <input type="file" id="documentInput" accept=".pdf,.txt,.docx,.csv" class="visually-hidden-input">
+        <input type="file" id="documentInput" accept=".pdf,.txt,.docx,.csv,.png,.jpg,.jpeg,.webp,.bmp,.tif,.tiff,.gif" class="visually-hidden-input">
         <button type="button" id="uploadBtn" class="hidden-control" tabindex="-1" aria-hidden="true">Upload</button>
       </div>
     </aside>
@@ -273,7 +273,7 @@
     onChatChanged();
 
     /* ---------- Document: ek hi button (composer ka clip) ---------- */
-    const ALLOWED = ["pdf", "txt", "docx", "csv"];
+    const ALLOWED = ["pdf", "txt", "docx", "csv", "png", "jpg", "jpeg", "webp", "bmp", "tif", "tiff", "gif"];
 
     function handlePickedFile() {
         const file = documentInput.files[0];
@@ -283,13 +283,13 @@
         }
         const ext = file.name.split(".").pop().toLowerCase();
         if (ALLOWED.indexOf(ext) === -1) {
-            uploadStatus.textContent = "Only .pdf, .txt, .docx or .csv files are allowed.";
+            uploadStatus.textContent = "Only PDF, TXT, DOCX, CSV or image files are allowed.";
             documentInput.value = "";
             return;
         }
         fileLabel.textContent = file.name;
         docStrip.classList.add("is-loaded");
-        uploadStatus.textContent = "Uploading...";
+        uploadStatus.textContent = "Uploading... scans & images are read with OCR, this can take a few seconds.";
         uploadBtn.click();   // asli upload chat.js hi karti hai
     }
     documentInput.addEventListener("change", handlePickedFile);

@@ -105,3 +105,16 @@ se bhi login ho sakta hai — password ki zaroorat nahi agar face match ho jaye.
   signup/login page kholte waqt browser popup dikhayega.
 - `face_utils.py` mein `MATCH_THRESHOLD` value tune ki ja sakti hai agar
   matches bohat strict ya bohat loose lagen (lower = strict, higher = loose).
+
+
+## OCR (scanned PDFs, images, Chinese / complex documents)
+
+Ab scanned PDFs aur images (PNG, JPG, WEBP, BMP, GIF, TIFF) bhi upload ho sakte hain -- unka text OCR se nikal kar
+normal documents ki tarah hi sawal-jawab hota hai.
+
+- OCR engine: Gemini vision (wahi `GEMINI_API_KEY`), code: `backend/rag/ocr.py`
+- PDF ke sirf wo pages OCR hote hain jo scanned / garbled / image-heavy hon; normal pages PyPDF2 se hi padhe jate hain
+- Chinese/Urdu/mixed text ke liye multilingual embedding model: `paraphrase-multilingual-MiniLM-L12-v2`
+  (model badalne ke baad purane documents dobara upload karein)
+- Optional env variables: `OCR_MAX_PAGES` (default 25), `OCR_WORKERS` (3), `OCR_DPI` (200), `OCR_MAX_SIDE` (3000)
+- Ab `.docx` aur `.csv` files bhi sahi parse hoti hain

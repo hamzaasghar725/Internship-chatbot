@@ -1,1 +1,8 @@
 .env
+.venv/
+venv/
+__pycache__/
+*.pyc
+backend/uploads/
+backend/vectorstore/
+backend/users.db
