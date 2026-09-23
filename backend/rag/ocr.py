@@ -125,13 +125,16 @@ def _prepare_image(img):
     return "image/jpeg", buf.getvalue()
 
 
-def _ocr_bytes(mime_type, data, label):
-    """Ek image ko Gemini se OCR karwata hai. Text (khaali bhi ho sakta hai) return karta hai."""
+def _ocr_bytes(mime_type, data, label, prompt=None):
+    """Ek image ko Gemini se OCR karwata hai. Text (khaali bhi ho sakta hai) return karta hai.
+    `prompt`: optional -- defaults to OCR_PROMPT. rag/ocr_report.py (HTML export)
+    passes its own prompt here to also get bounding boxes for logos/photos;
+    every other existing caller leaves this unset and behaves exactly as before."""
     started = time.time()
     print(f"[OCR] page {label}: sending {len(data) // 1024} KB to Gemini ...", flush=True)
     try:
         answer = _call_gemini(
-            OCR_PROMPT,
+            prompt or OCR_PROMPT,
             trace_name="ocr-page",
             metadata={"mode": "ocr", "page": label, "image_bytes": len(data)},
             images=[(mime_type, data)],
@@ -159,9 +162,11 @@ def _require_api_key():
         )
 
 
-def _run_ocr_jobs(jobs):
+def _run_ocr_jobs(jobs, prompt=None):
     """
     jobs: [(label, mime_type, bytes), ...]
+    prompt: optional custom OCR prompt (see _ocr_bytes) -- every existing
+    caller omits this and keeps using OCR_PROMPT, unchanged.
     Return: ({label: text}, {label: error_message})
     Pages parallel me (OCR_WORKERS) chalte hain. Har task apni contextvars copy
     ke sath chalta hai taake Langfuse ki "ocr-page" generations upload ke trace
@@ -173,7 +178,7 @@ def _run_ocr_jobs(jobs):
 
     def work(label, mime_type, data):
         try:
-            return label, _ocr_bytes(mime_type, data, label), None
+            return label, _ocr_bytes(mime_type, data, label, prompt=prompt), None
         except OCRError:
             raise
         except Exception as e:  # network / quota / blocked -- baaki pages ko mat rokho
