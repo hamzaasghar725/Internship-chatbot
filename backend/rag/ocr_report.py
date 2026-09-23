@@ -153,11 +153,18 @@ def _text_to_html(text, page_image_bytes=None):
     lines = text.split("\n")
     out = []
     buf = []
+    floated_open = False  # a left/right-floated visual is currently "open" beside the text
 
     def flush_buf():
         if buf:
             out.append(f'<pre class="ocr-text">{html.escape(chr(10).join(buf))}</pre>')
             buf.clear()
+
+    def close_float():
+        nonlocal floated_open
+        if floated_open:
+            out.append('<div class="ocr-clearfix"></div>')
+            floated_open = False
 
     i = 0
     while i < len(lines):
@@ -165,17 +172,37 @@ def _text_to_html(text, page_image_bytes=None):
         visual_match = _VISUAL_MARKER_RE.match(line)
         if visual_match:
             desc = visual_match.group("desc").strip()
-            cropped = None
-            if page_image_bytes:
-                bbox = tuple(float(visual_match.group(k)) for k in ("x1", "y1", "x2", "y2"))
-                cropped = _crop_bbox(page_image_bytes, bbox)
+            bbox = tuple(float(visual_match.group(k)) for k in ("x1", "y1", "x2", "y2"))
+            cropped = _crop_bbox(page_image_bytes, bbox) if page_image_bytes else None
             flush_buf()
             if cropped:
                 crop_mime, crop_bytes = cropped
                 crop_b64 = base64.b64encode(crop_bytes).decode("ascii")
+                # Keep the visual positioned the way it actually sits on the
+                # original scanned page: a logo/stamp near the left or right
+                # edge floats to that side (so the following text -- e.g. an
+                # address or a date -- wraps beside it exactly as it does in
+                # the scan) instead of always being dropped into its own
+                # full-width centered box.
+                x1, y1, x2, y2 = bbox
+                center_x = (x1 + x2) / 2
+                width_pct = max(18, min(48, round((x2 - x1) * 100)))
+                if center_x < 0.42:
+                    position_class = "ocr-visual-float-left"
+                elif center_x > 0.58:
+                    position_class = "ocr-visual-float-right"
+                else:
+                    position_class = "ocr-visual-center"
+                if position_class == "ocr-visual-center":
+                    close_float()
+                    style = ""
+                else:
+                    floated_open = True
+                    style = f' style="width:{width_pct}%"'
                 out.append(
-                    f'<figure class="ocr-visual"><img src="data:{crop_mime};base64,{crop_b64}" '
-                    f'alt="{html.escape(desc)}"><figcaption>{html.escape(desc)}</figcaption></figure>'
+                    f'<figure class="ocr-visual {position_class}"{style}>'
+                    f'<img src="data:{crop_mime};base64,{crop_b64}" alt="{html.escape(desc)}">'
+                    f'<figcaption>{html.escape(desc)}</figcaption></figure>'
                 )
             else:
                 # Model gave no usable box (or wasn't a real crop) -- degrade
@@ -190,6 +217,7 @@ def _text_to_html(text, page_image_bytes=None):
                 i += 1
             if len(block) >= 2:
                 flush_buf()
+                close_float()
                 out.append(_markdown_table_to_html(block))
             else:
                 buf.extend(block)  # a lone '|...|' line isn't really a table
@@ -197,6 +225,7 @@ def _text_to_html(text, page_image_bytes=None):
         buf.append(line)
         i += 1
     flush_buf()
+    close_float()
     return "\n".join(out)
 
 
@@ -267,6 +296,10 @@ _HTML_SHELL = """<!DOCTYPE html>
   figure.ocr-visual {{ margin: 10px 0; padding: 10px; border: 1px dashed #d5d9df; border-radius: 8px; background: #fafbfc; text-align: center; }}
   figure.ocr-visual img {{ max-width: 100%; max-height: 260px; border-radius: 4px; }}
   figure.ocr-visual figcaption {{ margin-top: 6px; font-size: 12px; color: #667; font-style: italic; }}
+  figure.ocr-visual-float-left {{ float: left; margin: 0 16px 10px 0; }}
+  figure.ocr-visual-float-right {{ float: right; margin: 0 0 10px 16px; }}
+  .ocr-clearfix {{ clear: both; }}
+  .page-text-col::after {{ content: ""; display: table; clear: both; }}
   .ocr-visual-fallback {{ color: #667; font-style: italic; font-size: 13px; }}
   table.ocr-table {{ border-collapse: collapse; width: 100%; margin: 10px 0; font-size: 13px; }}
   table.ocr-table th, table.ocr-table td {{ border: 1px solid #ccc; padding: 5px 8px; text-align: left; }}
