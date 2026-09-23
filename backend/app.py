@@ -13,6 +13,7 @@ load_dotenv()
 
 from models import db, User, ChatHistory, ChatSession
 from rag.rag_utils import build_or_update_index, answer_question, summarize_document, OCRError, IMAGE_EXTENSIONS
+from rag.ocr_report import build_ocr_html_report
 from face_utils import decode_base64_image, get_face_embedding, embedding_to_json, find_matching_user, FaceNotDetectedError, MultipleFacesDetectedError
 from clerk_utils import (
     is_clerk_configured,
@@ -433,6 +434,36 @@ def upload():
         "message": f"'{file.filename}' uploaded and {num_chunks} chunks added to the index.",
         "filename": file.filename
     })
+
+
+@app.route("/export-html", methods=["POST"])
+@login_required
+def export_html():
+    """
+    Generates a standalone HTML "proof sheet" for a scanned PDF / image
+    already uploaded by this user: every page's original scanned image next
+    to the text OCR extracted from it (side by side), plus honest extraction
+    stats. Runs its OWN OCR pass (rag/rag_utils.py's RAG indexing pipeline is
+    untouched by this) -- see rag/ocr_report.py for the full explanation.
+    """
+    data = request.get_json(force=True, silent=True) or {}
+    filename = (data.get("filename") or "").strip()
+    if not filename:
+        return jsonify({"error": "No document to export yet. Please upload a PDF or image first."}), 400
+
+    file_path = os.path.join(app.config["UPLOAD_FOLDER"], f"{current_user.id}_{filename}")
+    if not os.path.exists(file_path):
+        return jsonify({"error": "That file could not be found. Please upload it again."}), 404
+
+    try:
+        html_out, stats = build_ocr_html_report(file_path, filename)
+    except OCRError as e:
+        return jsonify({"error": str(e)}), 422
+    except Exception as e:
+        print(f"[ExportHTML] failed for '{filename}': {e}")
+        return jsonify({"error": "Could not generate the HTML export. Please try again."}), 500
+
+    return jsonify({"html": html_out, "stats": stats})
 
 
 @app.route("/ask", methods=["POST"])
