@@ -245,6 +245,70 @@ summarizeBtn.addEventListener("click", async () => {
     addMessage(data.summary || data.error, "bot", [], data.metrics);
 });
 
+// ---- Export as HTML: original page images + extracted text side by side ----
+const exportHtmlBtn = document.getElementById("exportHtmlBtn");
+
+function addExportResultMessage(stats, htmlContent) {
+    const div = document.createElement("div");
+    div.className = "msg bot";
+
+    const summaryParts = [
+        `HTML export ready for "${stats.filename}":`,
+        `${stats.ok_pages}/${stats.total_pages} page(s) OCR'd successfully (${stats.success_pct}%),`,
+        `${stats.total_words} word(s) extracted`,
+    ];
+    if (stats.unclear_markers) summaryParts.push(`, ${stats.unclear_markers} [unclear] marker(s) flagged`);
+    if (stats.failed_pages) summaryParts.push(`, ${stats.failed_pages} page(s) failed`);
+    if (stats.skipped_pages) summaryParts.push(`, ${stats.skipped_pages} page(s) skipped (page limit)`);
+    const summary = document.createElement("div");
+    summary.textContent = summaryParts.join(" ");
+    div.appendChild(summary);
+
+    const note = document.createElement("div");
+    note.className = "sources";
+    note.textContent = "The \"success rate\" above is how many pages OCR could read text from, not a proofread accuracy score -- open the file and compare each page's image against its text to check for yourself.";
+    div.appendChild(note);
+
+    const blob = new Blob([htmlContent], { type: "text/html" });
+    const url = URL.createObjectURL(blob);
+    const link = document.createElement("a");
+    link.href = url;
+    const baseName = (stats.filename || "document").replace(/\.[^./\\]+$/, "");
+    link.download = `${baseName}-ocr-export.html`;
+    link.className = "header-action-btn export-download-link";
+    link.textContent = "Download HTML";
+    div.appendChild(link);
+
+    chatBox.appendChild(div);
+    if (chatScroll) chatScroll.scrollTop = chatScroll.scrollHeight;
+}
+
+if (exportHtmlBtn) {
+    exportHtmlBtn.addEventListener("click", async () => {
+        if (!lastUploadedFilename) {
+            addMessage("Please upload a PDF or image first, then export it as HTML.", "bot");
+            return;
+        }
+        addMessage("Generating HTML export (OCR-ing every page -- this can take a little while for longer files)...", "bot");
+        try {
+            const res = await fetch("/export-html", {
+                method: "POST",
+                headers: { "Content-Type": "application/json" },
+                body: JSON.stringify({ filename: lastUploadedFilename })
+            });
+            const data = await res.json();
+            if (!res.ok) {
+                addMessage(data.error || "Could not generate the HTML export.", "bot");
+                return;
+            }
+            addExportResultMessage(data.stats || {}, data.html);
+        } catch (err) {
+            console.error("Export HTML failed:", err);
+            addMessage("Could not generate the HTML export (network error). Please try again.", "bot");
+        }
+    });
+}
+
 async function sendQuery() {
     const query = queryInput.value.trim();
     if (!query) return;

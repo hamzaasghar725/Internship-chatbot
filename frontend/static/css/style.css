@@ -672,6 +672,15 @@ input:focus-visible {
     color: var(--text);
 }
 
+/* Reuses .header-action-btn's look for the "Download HTML" link that shows
+   up inside a bot message after an OCR export finishes. */
+.export-download-link {
+    text-decoration: none;
+    margin-top: 8px;
+    cursor: pointer;
+    width: fit-content;
+}
+
 /* ---------- Conversation area ---------- */
 .conversation {
     position: relative;
