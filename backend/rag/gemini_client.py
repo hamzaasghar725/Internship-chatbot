@@ -11,9 +11,9 @@ from rag.tracing import _get_langfuse_client
 # a single name, we try several candidates and cache whichever one works for
 # subsequent calls.
 GEMINI_MODEL_CANDIDATES = [
-    "gemini-3.6-flash",
-    "gemini-3.5-flash",
     "gemini-3.5-flash-lite",
+    "gemini-3.5-flash",
+    "gemini-3.6-flash",
     "gemini-flash-latest",
     "gemini-pro-latest",
 ]
